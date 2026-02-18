@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "nao/orbital_shell.h"
+#include "nao/atomic_radials.h"
 
 /**
  * @brief A class that holds all numerical radial functions of the same kind.
@@ -34,6 +35,8 @@ class RadialCollection
 
     /// Builds the collection from BetaRadials objects.
     void build(const int ntype, BetaRadials* const nls);
+    /// Builds the collection from AtomicRadials objects.
+    void build(const int ntype, AtomicRadials* const nls);
     /// Builds the collection from RadialCollection objects and another radius cutoff.
     void build(const RadialCollection* nls, double radius = 0.0);
 

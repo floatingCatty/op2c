@@ -35,7 +35,6 @@ void TwoCenterIntegrator::tabulate(const RadialCollection& bra,
 {
     op_ = op;
     table_.build(bra, ket, op, nr, cutoff);
-    table_.build(bra, ket, op, nr, cutoff);
     gaunt_table_->build(std::max(bra.lmax(), ket.lmax()));
     is_tabulated_ = true;
 }
@@ -49,7 +48,6 @@ void TwoCenterIntegrator::tabulate(const RadialCollection& bra,
     op_ = 'S';
     tablep_.build(bra, ketp, op_, nr, cutoff);
     tablem_.build(bra, ketm, op_, nr, cutoff);
-    table_.build(bra, bra, op_, nr, cutoff);
     table_.build(bra, bra, op_, nr, cutoff);
     gaunt_table_->build(std::max(bra.lmax(), ketp.lmax())); // ketp's lmax should always larger than ketm's.
     is_tabulated_pos_ = true;
@@ -66,7 +64,6 @@ void TwoCenterIntegrator::tabulate(const RadialCollection& bra,
     op_ = 'S';
     tablep_.build(bra, ketp, op_, nr, cutoff);
     tablem_.build(bra, ketm, op_, nr, cutoff);
-    table_.build(bra, ket, op_, nr, cutoff);
     table_.build(bra, ket, op_, nr, cutoff);
     gaunt_table_->build(std::max(bra.lmax(), ketp.lmax())); 
     is_tabulated_pos_ = true;
@@ -143,83 +140,81 @@ void TwoCenterIntegrator::calculate(const int itype1,
     if (outRy) *outRy = 0.0;
     if (outRz) *outRz = 0.0;
 
-    // 1. Calculate Overlap (S)
+    // 1. Calculate Overlap (S) 
     double R = vR.norm();
-    // Max R needed is max of overlap and dipole tables.
-    double max_rcut = table_.rmax();
-    if (is_tabulated_pos_) max_rcut = std::max(max_rcut, std::max(tablep_.rmax(), tablem_.rmax()));
 
-    if (R > max_rcut) {
+    if (R > table_.rmax()) {
         *outS = 0.0;
         return;
     }
 
+    // unit vector along R
     ModuleBase::Vector3<double> uR = (R < 1e-12 ? ModuleBase::Vector3<double>(0., 0., 1.) : vR / R);
 
-    // Max L needed: 
-    // For S: l1 + l2
-    // For r: l1 + (l2 +/- 1) => l1 + l2 + 1
-    int lmax_S = l1 + l2;
-    int lmax_r = l1 + l2 + 1;
-    int lmax_overall = std::max(lmax_S, lmax_r);
-
+    // Max L: for S: l1+l2, for position: l1+l2+1
+    int lmax_overall = l1 + l2 + 1;
     std::vector<double> Rl_Y((lmax_overall+1) * (lmax_overall+1));
     ModuleBase::Ylm::rl_sph_harm(lmax_overall, vR[0], vR[1], vR[2], Rl_Y);
 
-    // S calculation
-    if (R <= table_.rmax()) {
-        calculate_kernel(l1, m1, l2, m2, table_, itype1, izeta1, itype2, izeta2, 
-                         R, uR, Rl_Y, nullptr, outS, nullptr);
-    } else {
-        *outS = 0.0;
-    }
+    // S calculation using calculate_kernel
+    calculate_kernel(l1, m1, l2, m2, table_, itype1, izeta1, itype2, izeta2, 
+                     R, uR, Rl_Y, nullptr, outS, nullptr);
 
-    // 2. Calculate Position (r) parts
+    // 2. Position operator dipole parts
+    // Following the ABACUS reference: each Cartesian component has
+    // its own m3 selection rules and sign (Condon-Shortley phase).
     bool do_pos = (outRx || outRy || outRz);
     
     if (do_pos && R <= std::min(tablep_.rmax(), tablem_.rmax())) 
     {
-        double pref = std::sqrt(ModuleBase::FOUR_PI / 3.0);
+        double pref_base = std::sqrt(ModuleBase::FOUR_PI / 3.0);
+        double S_by_Rl_val = 0.0;
+        double* S_by_Rl = &S_by_Rl_val;
+
+        // Process each Cartesian component separately
+        double* out_ptrs[3] = {outRx, outRy, outRz};
         
-        // Loop over l3 = l2 +/- 1
-        for (int l3 = (l2 == 0 ? 1 : l2 - 1); l3 <= l2 + 1; l3 += 2) {
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            if (!out_ptrs[alpha]) continue;
             
-            // Choose table
-            const TwoCenterTable* tab_ptr = nullptr;
-            if (l3 == l2 - 1) tab_ptr = &tablem_;
-            else if (l3 == l2 + 1) tab_ptr = &tablep_;
-            else continue; 
-
-            // Iterate valid m3 given m2 and dipole selection rules
-            // Dipole (L=1, mm=0, +/-1) pairs with l2 to give l3. m changes by -1, 0, 1.
-            for (int dm = -1; dm <= 1; ++dm) {
-                int m3 = m2 + dm;
-                if (m3 < -l3 || m3 > l3) continue;
-
-                // Compute overlap kernel value <l1 m1 | | l3 m3>
-                double kernel_val = 0.0;
-                calculate_kernel(l1, m1, l3, m3, *tab_ptr, itype1, izeta1, itype2, izeta2,
-                                 R, uR, Rl_Y, nullptr, &kernel_val, nullptr);
-                
-                if (std::abs(kernel_val) < 1e-15) continue;
-
-                // Z component (alpha='z', mm=0)
-                if (outRz && dm == 0) {
-                     double Gr = (*gaunt_table_)(l2, l3, 1, m2, m3, 0); 
-                     *outRz += kernel_val * Gr * pref;
-                }
-
-                // X component (alpha='x', mm=1, sign -1, involves m2+/-1)
-                // Y component (alpha='y', mm=-1, sign -1, involves m2+/-1)
-                
-                if (dm == -1 || dm == 1) {
-                    if (outRx) {
-                         double Gr = (*gaunt_table_)(l2, l3, 1, m2, m3, 1);
-                         *outRx += kernel_val * Gr * pref * (-1.0);
-                    }
-                    if (outRy) {
-                        double Gr = (*gaunt_table_)(l2, l3, 1, m2, m3, -1);
-                        *outRy += kernel_val * Gr * pref * (-1.0);
+            double pref = pref_base;
+            int mm;     // dipole m quantum number
+            int mr[2];  // m3 candidates
+            
+            if (alpha == 0) {        // X: mm = +1
+                mr[0] = m2 - 1;
+                mr[1] = m2 + 1;
+                mm = 1;
+                pref *= -1;          // Condon-Shortley phase for mm=+1
+            } else if (alpha == 1) { // Y: mm = -1
+                mr[0] = -m2 - 1;     // KEY: -m2, not m2!
+                mr[1] = -m2 + 1;
+                mm = -1;
+                pref *= -1;
+            } else {                 // Z: mm = 0
+                mr[0] = m2;
+                mr[1] = m2;
+                mm = 0;
+            }
+            
+            for (int l3 = (l2 == 0 ? 1 : l2 - 1); l3 <= l2 + 1; l3 += 2) {
+                for (int im = 0; im <= std::abs(mm); ++im) {
+                    int m3 = mr[im];
+                    if (m3 < -l3 || m3 > l3) continue;
+                    
+                    double Gr = (*gaunt_table_)(l2, l3, 1, m2, m3, mm);
+                    
+                    // Radial expansion: sum over l = |l1-l3| ... l1+l3
+                    int sign = (l1 - l3 - std::abs(l1 - l3)) % 4 == 0 ? 1 : -1;
+                    for (int l = std::abs(l1 - l3); l <= l1 + l3; l += 2) {
+                        const TwoCenterTable* tab_ptr = (l3 == l2 - 1) ? &tablem_ : &tablep_;
+                        tab_ptr->lookup(itype1, l1, izeta1, itype2, l3, izeta2, l, R, S_by_Rl, nullptr);
+                        
+                        for (int m = -l; m <= l; ++m) {
+                            double G = (*gaunt_table_)(l1, l3, l, m1, m3, m);
+                            *out_ptrs[alpha] += sign * pref * Gr * G * (*S_by_Rl) * Rl_Y[ylm_index(l, m)];
+                        }
+                        sign = -sign;
                     }
                 }
             }

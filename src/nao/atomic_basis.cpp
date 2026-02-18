@@ -199,6 +199,26 @@ void RadialCollection::build(const int ntype, BetaRadials* const nls)
     set_rcut_max();
 }
 
+void RadialCollection::build(const int ntype, AtomicRadials* const nls)
+{
+    cleanup();
+    ntype_ = ntype;
+    radset_.resize(ntype_);
+
+    for (int itype = 0; itype < ntype_; ++itype)
+    {
+        radset_[itype].reset(nls[itype].clone());
+
+        lmax_ = std::max(lmax_, radset_[itype]->lmax());
+        nchi_ += radset_[itype]->nchi();
+        nzeta_max_ = std::max(nzeta_max_, radset_[itype]->nzeta_max());
+        nphi_max_ = std::max(nphi_max_, radset_[itype]->nphi());
+    }
+
+    iter_build();
+    set_rcut_max();
+}
+
 void RadialCollection::build(const int nfile, const std::string* const file, const char ftype, const int p, const int pm, MPI_Comm comm)
 {
     int my_rank = 0;

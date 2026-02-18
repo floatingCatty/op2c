@@ -129,6 +129,9 @@ class TestLowLevelBindings(unittest.TestCase):
         self.assertTrue(hasattr(_op2c, 'BetaRadials'))
         self.assertTrue(hasattr(_op2c, 'Atom_pseudo'))
         self.assertTrue(hasattr(_op2c, 'Op2c'))
+        self.assertTrue(hasattr(_op2c, 'RadialCollection'))
+        self.assertTrue(hasattr(_op2c, 'TwoCenterIntegrator'))
+        self.assertTrue(hasattr(_op2c, 'TwoCenterBundle'))
 
     def test_atom_pseudo_low_level(self):
         """Low-level Atom_pseudo should expose init_from_upf."""
@@ -139,5 +142,70 @@ class TestLowLevelBindings(unittest.TestCase):
         self.assertTrue(hasattr(ap, 'd_so'))
 
 
+class TestRadialCollection(unittest.TestCase):
+    """Test RadialCollection binding."""
+
+    def test_default_construction(self):
+        rc = _op2c.RadialCollection()
+        self.assertEqual(rc.ntype, 0)
+        self.assertIn("RadialCollection", repr(rc))
+
+    def test_properties_empty(self):
+        rc = _op2c.RadialCollection()
+        self.assertEqual(rc.ntype, 0)
+        self.assertEqual(rc.p, 0)
+
+    def test_build_from_beta_empty(self):
+        """build_from_beta with empty list shouldn't crash."""
+        rc = _op2c.RadialCollection()
+        betas = []
+        rc.build_from_beta(betas)
+        self.assertEqual(rc.ntype, 0)
+
+
+class TestTwoCenterIntegrator(unittest.TestCase):
+    """Test TwoCenterIntegrator binding."""
+
+    def test_default_construction(self):
+        tci = _op2c.TwoCenterIntegrator()
+        self.assertEqual(tci.table_memory, 0)
+
+
+class TestTwoCenterBundle(unittest.TestCase):
+    """Test TwoCenterBundle binding."""
+
+    def test_default_construction(self):
+        tcb = _op2c.TwoCenterBundle()
+        self.assertIn("TwoCenterBundle", repr(tcb))
+
+    def test_integrators_none_before_tabulate(self):
+        """Integrators should be None before tabulate."""
+        tcb = _op2c.TwoCenterBundle()
+        self.assertIsNone(tcb.overlap_orb)
+        self.assertIsNone(tcb.overlap_orb_beta)
+        self.assertIsNone(tcb.kinetic_orb)
+
+    def test_collections_none_before_build(self):
+        """Radial collections should be None before build."""
+        tcb = _op2c.TwoCenterBundle()
+        self.assertIsNone(tcb.orb)
+        self.assertIsNone(tcb.beta)
+
+
+class TestOp2cWrapper(unittest.TestCase):
+    """Test Python Op2c wrapper."""
+
+    def test_import(self):
+        from op2c import Op2c, TwoCenterBundle
+        self.assertTrue(callable(Op2c.from_files))
+        self.assertTrue(callable(TwoCenterBundle.from_files))
+
+    def test_bundle_construction(self):
+        from op2c import TwoCenterBundle
+        b = TwoCenterBundle()
+        self.assertIn("TwoCenterBundle", repr(b))
+
+
 if __name__ == '__main__':
     unittest.main()
+

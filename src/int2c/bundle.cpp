@@ -4,6 +4,7 @@
 #include "utils/parallel_common.h"
 #include "math/ylm.h"
 #include "int2c/gaunt_table.h"
+#include "nao/atomic_radials.h"
 #include <memory>
 
 void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const std::string& orbital_dir, MPI_Comm comm)
@@ -32,6 +33,17 @@ void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const s
     orbm_->build(ntype, file_orb.data(), '\0', -1, -1, comm);
 
     // std::cout << "rank: " << rank << " 2CBuddle build_orb done" << std::endl;
+}
+
+void TwoCenterBundle::build_orb(int ntype, AtomicRadials* radials)
+{
+    orb_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    orbp_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    orbm_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+
+    orb_->build(ntype, radials);
+    orbp_->build(orb_.get(), -1, 1);
+    orbm_->build(orb_.get(), -1, -1);
 }
 
 void TwoCenterBundle::tabulate()

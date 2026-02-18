@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 
+class AtomicRadials;
+
 class TwoCenterBundle
 {
   public:
@@ -17,6 +19,7 @@ class TwoCenterBundle
 
     // NOTE: some variables might be set only on RANK-0
     void build_orb(int ntype, const std::string* file_orb0, const std::string& orbital_dir, MPI_Comm comm=MPI_COMM_WORLD);
+    void build_orb(int ntype, AtomicRadials* radials);
     // void build_beta(int ntype, Numerical_Nonlocal* nl);
     void build_beta(int ntype, BetaRadials* nl);
 

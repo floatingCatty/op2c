@@ -18,6 +18,7 @@
 #include "pseudopotential/pseudo_atom.h"
 #include "pseudopotential/io/read_pseudo.h"
 #include "utils/container/ATen/tensor.h"
+#include "nao/atomic_radials.h"
 #include <vector>
 #include <complex>
 #ifdef __MPI
@@ -52,6 +53,9 @@ private:
     int rank;
     int nspin;
     bool lspinorb;
+
+    /// Shared init: tabulate + build orb_map/beta_map
+    void build_maps();
     
 public:
     TwoCenterBundle tcbd;
@@ -74,6 +78,21 @@ public:
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
         MPI_Comm comm, const std::string& log_file
     );
+
+    /*!
+     * @brief Constructs Op2c from pre-loaded orbitals and pseudopotentials.
+     *
+     * @param orbitals Pre-loaded AtomicRadials objects (one per atom type).
+     * @param pseudos Pre-loaded Atom_pseudo objects (moved in).
+     * @param nspin Number of spin components.
+     * @param lspinorb Spin-orbit coupling flag.
+     */
+    Op2c(
+        std::vector<AtomicRadials> orbitals,
+        std::vector<Atom_pseudo> pseudos,
+        int nspin, bool lspinorb
+    );
+
     ~Op2c() = default;
 
     /*!

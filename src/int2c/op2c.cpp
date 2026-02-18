@@ -9,30 +9,15 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         ):
         comm(comm), nspin(nspin), lspinorb(lspinorb)
 {
-    // check
     int rank = 0;
 #ifdef __MPI
     MPI_Comm_rank(comm, &rank);
 #endif
     if (orb_name.size() != ntype){
-        if (rank == 0){
-            std::cout << "Error: orb_name.size() != ntype" << std::endl;
-        }
-#ifdef __MPI
-        MPI_Abort(comm, 1);
-#else
-        exit(1);
-#endif
+        throw std::runtime_error("orb_name.size() != ntype");
     }
     if (!psd_name.empty() && psd_name.size() != ntype){
-        if (rank == 0){
-            std::cout << "Error: psd_name.size() != ntype" << std::endl;
-        }
-#ifdef __MPI
-        MPI_Abort(comm, 1);
-#else
-        exit(1);
-#endif
+        throw std::runtime_error("psd_name.size() != ntype");
     }
 
     std::ofstream ofs;
@@ -41,35 +26,57 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
     }
     ModuleBase::Logger logger(log_file.empty() ? std::cout : ofs);
 
-    // std::cout << "rank: " << rank <<" build_orb " << orb_name[0] << " " << orb_dir << std::endl;
-    // std::cout << "rank: " << rank <<" build_orb " << orb_name[0] << " " << orb_dir << std::endl;
     tcbd.build_orb(ntype, orb_name.data(), orb_dir, comm);
-    // std::cout << "rank: " << rank <<" build_orb done" << std::endl;
 
     if(!psd_name.empty()) {
-        //TODO: problem, how does this routine setup the tightest rcut of pseudos?
-        // it should be larger than the largest rcut of pseudos
         psds.resize(ntype);
-        
-        // std::cout << "start reading psd " << std::endl;
         read_pseudo(psd_dir, psd_name, "auto", 10.0, false, 0.0, logger, psds, comm);
-        // std::cout << "end reading psd " << std::endl;
 
         std::vector<BetaRadials> beta_radials(ntype);
-        for(int itype=0; itype<ntype; ++itype){
+        for(size_t itype=0; itype<ntype; ++itype){
             beta_radials[itype] = psds[itype].beta_radials;
         }
-        // std::cout << "build_beta" << std::endl;
         tcbd.build_beta(ntype, beta_radials.data());
     }
 
-    // std::cout << "tabulate" << std::endl;
+    build_maps();
+};
+
+Op2c::Op2c(
+    std::vector<AtomicRadials> orbitals,
+    std::vector<Atom_pseudo> pseudos,
+    int nspin, bool lspinorb
+    ):
+    comm(0), nspin(nspin), lspinorb(lspinorb),
+    psds(std::move(pseudos))
+{
+    size_t ntype = orbitals.size();
+
+    tcbd.build_orb(ntype, orbitals.data());
+
+    if(!psds.empty()) {
+        if (psds.size() != ntype){
+            throw std::runtime_error("pseudos.size() != orbitals.size()");
+        }
+        std::vector<BetaRadials> beta_radials(ntype);
+        for(size_t itype=0; itype<ntype; ++itype){
+            beta_radials[itype] = psds[itype].beta_radials;
+        }
+        tcbd.build_beta(ntype, beta_radials.data());
+    }
+
+    build_maps();
+}
+
+void Op2c::build_maps()
+{
+    size_t ntype = tcbd.orb_->ntype();
+
     tcbd.tabulate();
 
-    // std::cout << "orb_map" << std::endl;
-    // build the orbital mapping table: [itype][iorb] -> (l, zeta, m)
-    orb_map.resize({(int)ntype, tcbd.orb_->nphi_max(),3});
-    for(int itype=0; itype<ntype; ++itype){
+    // build orbital mapping table: [itype][iorb] -> (l, zeta, m)
+    orb_map.resize({(int)ntype, tcbd.orb_->nphi_max(), 3});
+    for(size_t itype=0; itype<ntype; ++itype){
         int iphi = 0;
         for(int l=0; l<=tcbd.orb_->lmax(itype); ++l){
             for(int izeta=0; izeta<tcbd.orb_->nzeta(itype, l); ++izeta){
@@ -83,11 +90,10 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         }
     }
 
-    if(!psd_name.empty()) {
-        // std::cout << "beta_map" << std::endl;
-        // build the beta mapping table: [itype][ibeta] -> (l, zeta, m)
+    if(tcbd.beta_) {
+        // build beta mapping table: [itype][ibeta] -> (l, zeta, m)
         beta_map.resize({(int)ntype, tcbd.beta_->nphi_max(), 3});
-        for(int itype=0; itype<ntype; ++itype){
+        for(size_t itype=0; itype<ntype; ++itype){
             int iphi = 0;
             for(int l=0; l<=tcbd.beta_->lmax(itype); ++l){
                 for(int izeta=0; izeta<tcbd.beta_->nzeta(itype, l); ++izeta){
@@ -101,8 +107,7 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
             }
         }
     }
-
-};
+}
 
 void Op2c::overlap(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx, std::vector<double>* dvy, std::vector<double>* dvz)
 {

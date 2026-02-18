@@ -284,8 +284,110 @@ void bind_atom_pseudo(py::module &m) {
         });
 }
 
+void bind_radial_collection(py::module &m) {
+    py::class_<RadialCollection>(m, "RadialCollection")
+        .def(py::init<>())
+        .def("build_from_files", [](RadialCollection& self, const std::vector<std::string>& files, char ftype, int p, int pm) {
+            self.build(files.size(), files.data(), ftype, p, pm);
+        }, py::arg("files"), py::arg("ftype")='\0', py::arg("p")=0, py::arg("pm")=0)
+        .def("build_from_beta", [](RadialCollection& self, std::vector<BetaRadials>& betas) {
+            self.build(betas.size(), betas.data());
+        }, py::arg("betas"))
+        .def("build_from_collection", [](RadialCollection& self, const RadialCollection& other, double radius) {
+            self.build(&other, radius);
+        }, py::arg("other"), py::arg("radius")=0.0)
+        .def("build_from_collection_pm", [](RadialCollection& self, const RadialCollection& other, int p, int pm, double radius) {
+            self.build(&other, p, pm, radius);
+        }, py::arg("other"), py::arg("p"), py::arg("pm"), py::arg("radius")=0.0)
+        
+        // Getters
+        .def_property_readonly("ntype", &RadialCollection::ntype)
+        .def("lmax", (int (RadialCollection::*)(const int) const) &RadialCollection::lmax, py::arg("itype"))
+        .def("lmax_all", (int (RadialCollection::*)() const) &RadialCollection::lmax)
+        .def("rcut_max", (double (RadialCollection::*)(const int) const) &RadialCollection::rcut_max, py::arg("itype"))
+        .def("rcut_max_all", (double (RadialCollection::*)() const) &RadialCollection::rcut_max)
+        .def("nzeta", &RadialCollection::nzeta, py::arg("itype"), py::arg("l"))
+        .def("nzeta_max", (int (RadialCollection::*)() const) &RadialCollection::nzeta_max)
+        .def("nphi_max", &RadialCollection::nphi_max)
+        .def("nphi", &RadialCollection::nphi, py::arg("itype"))
+        .def("nchi", (int (RadialCollection::*)() const) &RadialCollection::nchi)
+        .def("nchi_type", (int (RadialCollection::*)(const int) const) &RadialCollection::nchi, py::arg("itype"))
+        .def_property_readonly("p", &RadialCollection::p)
+        
+        .def("set_uniform_grid", &RadialCollection::set_uniform_grid,
+             py::arg("for_r_space"), py::arg("ngrid"), py::arg("cutoff"),
+             py::arg("mode")='i', py::arg("enable_fft")=false)
+
+        .def("__repr__", [](const RadialCollection& self) -> std::string {
+            return "<RadialCollection ntype=" + std::to_string(self.ntype()) + 
+                   " nchi=" + std::to_string(self.nchi()) + ">";
+        });
+}
+
+void bind_two_center_integrator(py::module &m) {
+    py::class_<TwoCenterIntegrator>(m, "TwoCenterIntegrator")
+        .def(py::init<>())
+        .def("tabulate_overlap", [](TwoCenterIntegrator& self, const RadialCollection& bra, const RadialCollection& ket, 
+                                     char op, int nr, double cutoff) {
+            self.tabulate(bra, ket, op, nr, cutoff);
+        }, py::arg("bra"), py::arg("ket"), py::arg("op")='S', py::arg("nr")=0, py::arg("cutoff")=0.0)
+        .def("tabulate_position", [](TwoCenterIntegrator& self, const RadialCollection& bra,
+                                      const RadialCollection& ket, const RadialCollection& ketp, const RadialCollection& ketm,
+                                      int nr, double cutoff) {
+            self.tabulate(bra, ket, ketp, ketm, nr, cutoff);
+        }, py::arg("bra"), py::arg("ket"), py::arg("ketp"), py::arg("ketm"), py::arg("nr"), py::arg("cutoff"))
+        .def("tabulate_beta", [](TwoCenterIntegrator& self, const RadialCollection& bra,
+                                  const RadialCollection& ketp, const RadialCollection& ketm,
+                                  int nr, double cutoff) {
+            self.tabulate(bra, ketp, ketm, nr, cutoff);
+        }, py::arg("bra"), py::arg("ketp"), py::arg("ketm"), py::arg("nr"), py::arg("cutoff"))
+        .def_property_readonly("table_memory", &TwoCenterIntegrator::table_memory);
+}
+
+void bind_two_center_bundle(py::module &m) {
+    py::class_<TwoCenterBundle>(m, "TwoCenterBundle")
+        .def(py::init<>())
+        .def("build_orb", [](TwoCenterBundle& self, const std::vector<std::string>& orb_names, const std::string& orb_dir) {
+            self.build_orb(orb_names.size(), orb_names.data(), orb_dir);
+        }, py::arg("orb_names"), py::arg("orb_dir"))
+        .def("build_beta", [](TwoCenterBundle& self, std::vector<BetaRadials>& betas) {
+            self.build_beta(betas.size(), betas.data());
+        }, py::arg("betas"))
+        .def("tabulate", (void (TwoCenterBundle::*)()) &TwoCenterBundle::tabulate)
+        .def("tabulate_with_params", (void (TwoCenterBundle::*)(const double, const double, const double, const double)) &TwoCenterBundle::tabulate,
+             py::arg("lcao_ecut"), py::arg("lcao_dk"), py::arg("lcao_dr"), py::arg("lcao_rmax"))
+        
+        // Read-only access to integrators
+        .def_property_readonly("overlap_orb", [](const TwoCenterBundle& self) -> const TwoCenterIntegrator* {
+            return self.overlap_orb.get();
+        }, py::return_value_policy::reference_internal)
+        .def_property_readonly("overlap_orb_beta", [](const TwoCenterBundle& self) -> const TwoCenterIntegrator* {
+            return self.overlap_orb_beta.get();
+        }, py::return_value_policy::reference_internal)
+        .def_property_readonly("kinetic_orb", [](const TwoCenterBundle& self) -> const TwoCenterIntegrator* {
+            return self.kinetic_orb.get();
+        }, py::return_value_policy::reference_internal)
+        
+        // Read-only access to radial collections
+        .def_property_readonly("orb", [](const TwoCenterBundle& self) -> const RadialCollection* {
+            return self.orb_.get();
+        }, py::return_value_policy::reference_internal)
+        .def_property_readonly("beta", [](const TwoCenterBundle& self) -> const RadialCollection* {
+            return self.beta_.get();
+        }, py::return_value_policy::reference_internal)
+        
+        .def("__repr__", [](const TwoCenterBundle& self) -> std::string {
+            std::string s = "<TwoCenterBundle";
+            if (self.orb_) s += " orb_ntype=" + std::to_string(self.orb_->ntype());
+            if (self.beta_) s += " beta_ntype=" + std::to_string(self.beta_->ntype());
+            s += ">";
+            return s;
+        });
+}
+
 void bind_op2c(py::module &m) {
     py::class_<Op2c>(m, "Op2c")
+        // Constructor from file paths
         .def(py::init([](size_t ntype, int nspin, bool lspinorb,
                          const std::string& orb_dir, const std::vector<std::string> orb_name,
                          const std::string& psd_dir, const std::vector<std::string> psd_name,
@@ -295,11 +397,10 @@ void bind_op2c(py::module &m) {
             int flag = 0;
             MPI_Initialized(&flag);
             if (!flag) {
-                // MPI not initialized, initialize standard serial mode
                 MPI_Init(NULL, NULL);
-                std::atexit([](){ 
-                    int f; MPI_Finalized(&f); 
-                    if(!f) MPI_Finalize(); 
+                std::atexit([](){
+                    int f; MPI_Finalized(&f);
+                    if(!f) MPI_Finalize();
                 });
             }
 
@@ -307,7 +408,6 @@ void bind_op2c(py::module &m) {
                 comm = MPI_Comm_f2c((MPI_Fint)mpi_handle);
             }
 #else
-            // Avoid unused warning
             (void)mpi_handle;
             comm = 0;
 #endif
@@ -318,6 +418,21 @@ void bind_op2c(py::module &m) {
         py::arg("psd_dir") = "", py::arg("psd_name") = std::vector<std::string>(),
         py::arg("log_file") = "", py::arg("mpi_handle") = 0)
         
+        // Constructor from pre-loaded objects
+        .def(py::init([](std::vector<AtomicRadials> orbitals,
+                         std::vector<Atom_pseudo> pseudos,
+                         int nspin, bool lspinorb) {
+            return new Op2c(std::move(orbitals), std::move(pseudos), nspin, lspinorb);
+        }),
+        py::arg("orbitals"), py::arg("pseudos") = std::vector<Atom_pseudo>(),
+        py::arg("nspin") = 1, py::arg("lspinorb") = false)
+
+        // Access to bundle
+        .def_readonly("tcbd", &Op2c::tcbd)
+        .def("get_orb_rcut_max", &Op2c::get_orb_rcut_max, py::arg("itype"))
+        .def("get_beta_rcut_max", &Op2c::get_beta_rcut_max, py::arg("itype"))
+
+
         .def("overlap", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {
             int inorb = self.tcbd.orb_->nphi(itype);
             int jnorb = self.tcbd.orb_->nphi(jtype);
@@ -394,5 +509,9 @@ PYBIND11_MODULE(_op2c, m) {
     bind_atomic_radials(m);
     bind_beta_radials(m);
     bind_atom_pseudo(m);
+    bind_radial_collection(m);
+    bind_two_center_integrator(m);
+    bind_two_center_bundle(m);
     bind_op2c(m);
 }
+
