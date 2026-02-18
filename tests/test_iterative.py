@@ -4,16 +4,8 @@ import os
 import numpy as np
 import time
 
-# Ensure we can import the build module
-build_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../build"))
-if build_path not in sys.path:
-    sys.path.append(build_path)
+from _op2c import Op2c
 
-try:
-    from _estate import Op2c
-except ImportError:
-    sys.path.append(build_path)
-    from _estate import Op2c
 
 class TestOp2CIterative(unittest.TestCase):
     def setUp(self):

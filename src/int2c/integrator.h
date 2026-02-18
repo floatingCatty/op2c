@@ -11,30 +11,22 @@
 #include "utils/array_pool.h"
 
 /*!
- * @brief A class to compute two-center integrals
+ * @class TwoCenterIntegrator
+ * @brief Computes two-center integrals and their derivatives using tabulated radial functions.
  *
- * This class computes two-center integrals
+ * This class handles the evaluation of integrals of the form:
+ * \f[ I(\mathbf{R}) = \int d^3\mathbf{r} \, \phi_a(\mathbf{r}) \hat{O} \phi_b(\mathbf{r} - \mathbf{R}) \f]
+ * where \f$ \phi(\mathbf{r}) = \chi(r) Y_{lm}(\hat{\mathbf{r}}) \f$ are numerical atomic orbitals.
  *
- *                     /    
- *              I(R) = | dr phi1(r) (op) phi2(r - R)
- *                     /               
+ * It uses the **Talman Method** (Fourier Transform) to pre-calculate radial integrals on a logarithmic grid,
+ * creating a `TwoCenterTable`. During the evaluation phase (`calculate`), it interpolates these tables
+ * and combines them with Spherical Harmonics and Gaunt coefficients to produce the final result.
  *
- * as well as their gradients, where op is 1 (overlap) or minus Laplacian (kinetic),
- * and phi1, phi2 are "atomic-orbital-like" functions of the form
- *
- *              phi(r) = chi(|r|) * Ylm(r/|r|)
- *
- * where chi is some numerical radial function and Ylm is some real spherical harmonics.
- *
- * This class is designed to efficiently compute the two-center integrals between 
- * two "collections" of the above functions with various R, e.g., the overlap integrals 
- * between all numerical atomic orbitals and all Kleinman-Bylander nonlocal projectors,
- * the overlap & kinetic integrals between all numerical atomic orbitals, etc.
- * This is done by tabulating the radial part of the integrals on an r-space grid and
- * the real Gaunt coefficients in advance.
- *
- * See the developer's document for more details.
- *                                                                                      */
+ * Supported Operators:
+ * - Overlap (S): \f$ \hat{O} = 1 \f$
+ * - Kinetic (T): \f$ \hat{O} = -\frac{1}{2}\nabla^2 \f$
+ * - Position (r): handled via \f$ \Delta L = \pm 1 \f$ shifts in `calculate`.
+ */
 class TwoCenterIntegrator
 {
   public:
@@ -44,14 +36,16 @@ class TwoCenterIntegrator
     TwoCenterIntegrator& operator=(const TwoCenterIntegrator&) = delete;
 
     /*!
-     * @brief Tabulates the radial part of a two-center integral.
+     * @brief Tabulates radial integrals for a given operator.
      *
-     * @param[in] bra          The radial functions of the first collection.
-     * @param[in] ket          The radial functions of the second collection.
-     * @param[in] op           Operator, could be 'S' or 'T'.
-     * @param[in] nr           Number of r-space grid points.
-     * @param[in] cutoff       r-space cutoff radius.
-     *                                                                                  */
+     * Pre-computes the radial integral \f$ S_L(R) \f$ for all pairs of orbitals in `bra` and `ket` sets.
+     *
+     * @param[in] bra Collection of radial functions for the first center.
+     * @param[in] ket Collection of radial functions for the second center.
+     * @param[in] op Operator type code: 'S' (Overlap), 'T' (Kinetic), 'R' (Radial only).
+     * @param[in] nr Number of radial grid points for the table.
+     * @param[in] cutoff Maximum radius \f$ R_{cut} \f$ for the table (Bohr).
+     */
     void tabulate(const RadialCollection& bra,
                   const RadialCollection& ket,
                   const char op,
@@ -68,6 +62,20 @@ class TwoCenterIntegrator
                   const double cutoff
     );
 
+    /*!
+     * @brief Tabulates radial integrals specifically for Position Operator calculations.
+     *
+     * This prepares tables for the standard overlap (`ket`) as well as the 
+     * \f$ \Delta L = +1 \f$ (`ketp`) and \f$ \Delta L = -1 \f$ (`ketm`) shifted orbitals
+     * required for the position operator dipole selection rules.
+     *
+     * @param[in] bra First orbital collection.
+     * @param[in] ket Standard second orbital collection (for Overlap part).
+     * @param[in] ketp Second collection with \f$ \times r \f$ and \f$ L+1 \f$.
+     * @param[in] ketm Second collection with \f$ \times r \f$ and \f$ L-1 \f$.
+     * @param[in] nr Grid size.
+     * @param[in] cutoff Cutoff radius.
+     */
     void tabulate(const RadialCollection& bra,
                   const RadialCollection& ket,
                   const RadialCollection& ketp,
@@ -117,7 +125,20 @@ class TwoCenterIntegrator
                    double* grad_out = nullptr
     ) const;
 
-    // compute the overlap and position matrix
+    /*!
+     * @brief Advanced calculation method for joint Overlap and Position integrals.
+     *
+     * Simultaneously computes \f$ S \f$ and \f$ \langle \mathbf{r} \rangle \f$.
+     *
+     * @param itype1, l1, izeta1, m1 Quantum numbers for first orbital.
+     * @param itype2, l2, izeta2, m2 Quantum numbers for second orbital.
+     * @param vR Relative position \f$ \mathbf{R}_2 - \mathbf{R}_1 \f$.
+     * @param R2 Absolute position of center 2 (needed for \f$ \langle \mathbf{r} \rangle = \langle \mathbf{r}' \rangle + \mathbf{R}_2 S \f$).
+     * @param[out] outS Output Overlap integral.
+     * @param[out] outRx Output Position x-component.
+     * @param[out] outRy Output Position y-component.
+     * @param[out] outRz Output Position z-component.
+     */
     void calculate(const int itype1, 
                    const int l1, 
                    const int izeta1, 

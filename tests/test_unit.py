@@ -3,17 +3,8 @@ import sys
 import os
 import numpy as np
 
-# Ensure we can import the build module
-build_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../build"))
-if build_path not in sys.path:
-    sys.path.append(build_path)
+from _op2c import Op2c
 
-try:
-    from _estate import Op2c
-except ImportError:
-    # If _estate is directly in build
-    sys.path.append(build_path)
-    from _estate import Op2c
 
 class TestOp2CUnit(unittest.TestCase):
     def setUp(self):
@@ -62,7 +53,7 @@ class TestOp2CUnit(unittest.TestCase):
         ktype = 0
         Ri = [[0.0, 0.0, 0.0]]
         Rk = [0.5, 0.0, 0.0]
-        # returns tuple of lists of matricies/arrays
+        # returns tuple of lists of matrices/arrays
         ob, oxb, oyb, ozb = self.op2c.orb_r_beta(itypes, ktype, Ri, Rk, False)
         self.assertEqual(len(ob), 1)
         self.assertTrue(ob[0].size > 0)
@@ -72,14 +63,8 @@ class TestOp2CUnit(unittest.TestCase):
         ktype = 0
         jtype = 0
         
-        # We need to compute orb_r_beta first to get ob, oxb, oyb, ozb
-        # Let's use dummy positions that make sense (e.g. same as C++ test)
-        # In C++ test: Ri=0, Rk=0.5
         Ri = [[0.0, 0.0, 0.0]]
         Rk = [0.5, 0.0, 0.0]
-        # In test_op2c.cpp:
-        # std::vector<size_t> itypes = {0};
-        # op2c.orb_r_beta(itypes, ktype, Ris, Rk, is_transpose, ob, oxb, oyb, ozb);
         
         ob, oxb, oyb, ozb = self.op2c.orb_r_beta([itype], ktype, Ri, Rk, False)
         

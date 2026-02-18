@@ -28,8 +28,8 @@ public:
 	// mohan add 2021-05-07
 	ModuleBase::ComplexArray d_so; //(:,:,:), spin-orbit case
 	ModuleBase::matrix d_real; //(:,:), non-spin-orbit case
-	int nproj;
-	int nproj_soc; // dimension of D_ij^so
+	int nproj = 0;
+	int nproj_soc = 0; // dimension of D_ij^so
 	int itype = 0;
 	std::vector<int> non_zero_count_soc = {0, 0, 0, 0};
 	std::vector<std::vector<int>> index1_soc = {{}, {}, {}, {}};

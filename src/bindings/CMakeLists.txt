@@ -13,12 +13,12 @@ if(NOT pybind11_FOUND)
     FetchContent_MakeAvailable(pybind11)
 endif()
 
-pybind11_add_module(_estate py_nao.cpp)
+pybind11_add_module(_op2c py_nao.cpp)
 
 # Link against our new libraries
-target_link_libraries(_estate PRIVATE nao_int2c nao_pseudo nao_core nao_math nao_utils)
+target_link_libraries(_op2c PRIVATE nao_int2c nao_pseudo nao_core nao_math nao_utils)
 
 # Ensure includes are found
-target_include_directories(_estate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(_op2c PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-install(TARGETS _estate DESTINATION .)
+install(TARGETS _op2c DESTINATION .)

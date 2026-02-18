@@ -1,0 +1,27 @@
+[build-system]
+requires = ["scikit-build-core>=0.5", "pybind11", "numpy"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "op2c"
+version = "0.1.0"
+description = "Op2c: Two-center integrals and NAO/Pseudo handling"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.15"
+cmake.build-type = "Release"
+
+# Ensure passing python include/library paths to CMake which pybind11 uses
+# scikit-build-core handles this automatically usually.
+
+[tool.scikit-build.cmake.define]
+# Define any CMake variables here if needed
+# EXAMPLE_VAR = "Value"
+
+# Include package data if any
+#[tool.scikit-build.sdist]
+#include = ["op2c/py.typed"]

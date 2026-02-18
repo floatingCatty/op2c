@@ -27,6 +27,21 @@
     #define MPI_COMM_WORLD 0
 #endif
 
+
+/*!
+ * @class Op2c
+ * @brief High-level interface for computing two-center integrals in ABACUS.
+ *
+ * This class coordinates the calculation of:
+ * - Overlap integrals: < phi_i | phi_j >
+ * - Position operator integrals: < phi_i | r | phi_j >
+ * - Non-local pseudopotential interactions: < phi_i | beta >
+ * - Kinetic energy and other operators (extensible).
+ *
+ * It manages the `TwoCenterBundle` which handles lower-level radial tabulation and integration.
+ * The operators are computed in a real-space block format, suitable for assembling the 
+ * Hamiltonian and Overlap matrices in linear-scaling or plane-wave DFT.
+ */
 class Op2c
 {
 private:
@@ -40,6 +55,20 @@ private:
     
 public:
     TwoCenterBundle tcbd;
+
+    /*!
+     * @brief Constructs the Op2c operator handler.
+     *
+     * @param ntype Number of atom types (elements).
+     * @param nspin Number of spin components (1 or 2).
+     * @param lspinorb True if spin-orbit coupling is enabled.
+     * @param orb_dir Directory containing numerical atomic orbital files.
+     * @param orb_name List of filenames for orbitals of each element type.
+     * @param psd_dir Directory containing pseudopotential files.
+     * @param psd_name List of filenames for pseudopotentials of each element type.
+     * @param comm MPI Communicator for parallel execution.
+     * @param log_file Path to local log file (optional).
+     */
     Op2c(
         size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
@@ -47,8 +76,36 @@ public:
     );
     ~Op2c() = default;
 
+    /*!
+     * @brief Computes the overlap integral S_ij = < phi_i | phi_j >.
+     *
+     * @param itype Element type index of atom i.
+     * @param jtype Element type index of atom j.
+     * @param Rij Displacement vector R_j - R_i.
+     * @param is_transpose If true, the result blocks are transposed.
+     * @param[out] v Flattened output array for S values. Size mapping: [block_i, block_j].
+     * @param[out] dvx (Optional) x-component of the gradient dS/dR.
+     * @param[out] dvy (Optional) y-component of the gradient dS/dR.
+     * @param[out] dvz (Optional) z-component of the gradient dS/dR.
+     */
     void overlap(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx = nullptr, std::vector<double>* dvy = nullptr, std::vector<double>* dvz = nullptr);
 
+    /*!
+     * @brief Computes overlap and position operator integrals simultaneously.
+     *
+     * Computes < phi_i | phi_j > and < phi_i | r | phi_j >.
+     * Note that the position operator acts in the global frame.
+     *
+     * @param itype Element type index of atom i.
+     * @param jtype Element type index of atom j.
+     * @param Ri Absolute position of atom i.
+     * @param Rj Absolute position of atom j.
+     * @param is_transpose If true, the result blocks are transposed.
+     * @param[out] v Overlap integral S.
+     * @param[out] vx x-component of position integral <x>.
+     * @param[out] vy y-component of position integral <y>.
+     * @param[out] vz z-component of position integral <z>.
+     */
     void overlap_position(
         size_t itype, size_t jtype, 
         ModuleBase::Vector3<double> Ri, ModuleBase::Vector3<double> Rj, 
@@ -56,6 +113,21 @@ public:
         std::vector<double>& v, std::vector<double>& vx, std::vector<double>& vy, std::vector<double>& vz
     );
 
+    /*!
+     * @brief Computes integrals between atomic orbitals and beta projectors < phi_i | beta_k >.
+     *
+     * Used for constructing the non-local pseudopotential part of the Hamiltonian.
+     *
+     * @param itype List of atom types for the bra side (orbitals).
+     * @param ktype Atom type for the ket side (beta projector).
+     * @param Ri List of positions for orbital atoms.
+     * @param Rk Position of the beta projector atom.
+     * @param is_transpose If true, transpose the result.
+     * @param[out] ob Overlap < phi | beta >.
+     * @param[out] oxb x-derivative < d_phi/dx | beta > (or gradient w.r.t R).
+     * @param[out] oyb y-derivative.
+     * @param[out] ozb z-derivative.
+     */
     void orb_r_beta(
         std::vector<size_t>& itype, size_t ktype, 
         std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
@@ -64,6 +136,25 @@ public:
         std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb
     );
 
+    /*!
+     * @brief Computes non-local commutator integrals [r, V_nl].
+     *
+     * Specifically computes the matrix element involving the position operator and non-local projectors.
+     * Used for velocity or Berry phase calculations.
+     *
+     * @param itype Atom type of orbital i.
+     * @param idx Index of atom i in neighbor list.
+     * @param ktype Atom type of projector k.
+     * @param jtype Atom type of orbital j.
+     * @param jdx Index of atom j in neighbor list.
+     * @param ob Overlap <phi|beta> matrices.
+     * @param oxb x-component matrices.
+     * @param oyb y-component matrices.
+     * @param ozb z-component matrices.
+     * @param npol POLARIZATION dimension (1 or 2).
+     * @param is_transpose Transpose flag.
+     * @param[out] vx, vy, vz Resulting commutator integrals.
+     */
     void ncomm_IKJ(
         size_t itype, size_t idx, size_t ktype, size_t jtype, size_t jdx, 
         std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb, 
