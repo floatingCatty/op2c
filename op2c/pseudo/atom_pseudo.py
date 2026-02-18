@@ -1,6 +1,8 @@
+from __future__ import annotations
 import _op2c
 import numpy as np
 from .beta_radials import BetaRadials
+from typing import Optional
 
 class AtomPseudo:
     """
@@ -15,7 +17,7 @@ class AtomPseudo:
 
     @classmethod
     def from_upf(cls, filename: str, type: str = "upf", rcut: float = 0.0, 
-                 lspinorb: bool = False, soc_lambda: float = 0.0):
+                 lspinorb: bool = False, soc_lambda: float = 0.0) -> AtomPseudo:
         """
         Initialize AtomPseudo from a UPF (or other supported) file.
         
@@ -31,94 +33,94 @@ class AtomPseudo:
         return obj
 
     @property
-    def nproj(self):
+    def nproj(self) -> int:
         return self._handle.nproj
     
     @nproj.setter
-    def nproj(self, value):
+    def nproj(self, value: int):
         self._handle.nproj = value
 
     @property
-    def nproj_soc(self):
+    def nproj_soc(self) -> int:
         return self._handle.nproj_soc
         
     @nproj_soc.setter
-    def nproj_soc(self, value):
+    def nproj_soc(self, value: int):
         self._handle.nproj_soc = value
 
     @property
-    def itype(self):
+    def itype(self) -> int:
         return self._handle.itype
     
     @itype.setter
-    def itype(self, value):
+    def itype(self, value: int):
         self._handle.itype = value
 
     @property
-    def beta_radials(self):
+    def beta_radials(self) -> BetaRadials:
         """Returns the BetaRadials (projectors) object wrapper."""
         return BetaRadials(self._handle.beta_radials)
     
     @property
-    def d_real(self):
+    def d_real(self) -> np.ndarray:
         """Returns the non-SOC coupling matrix D as a numpy array."""
         return np.array(self._handle.d_real, copy=False)
 
     @d_real.setter
-    def d_real(self, value):
+    def d_real(self, value: np.ndarray):
         self._handle.d_real = value
         
     @property
-    def d_so(self):
+    def d_so(self) -> np.ndarray:
         """Returns the spin-orbit part of the D matrix as a complex numpy array."""
         return self._handle.d_so
         
     # Read-only properties from base class
     @property
-    def psd(self): return self._handle.psd
+    def psd(self) -> str: return self._handle.psd
     
     @property
-    def pp_type(self): return self._handle.pp_type
+    def pp_type(self) -> str: return self._handle.pp_type
     
     @property
-    def zv(self): return self._handle.zv
+    def zv(self) -> float: return self._handle.zv
     
     @property
-    def etotps(self): return self._handle.etotps
+    def etotps(self) -> float: return self._handle.etotps
     
     @property
-    def lmax(self): return self._handle.lmax
+    def lmax(self) -> int: return self._handle.lmax
     
     @property
-    def mesh(self): return self._handle.mesh
+    def mesh(self) -> int: return self._handle.mesh
     
     @property
-    def nbeta(self): return self._handle.nbeta
+    def nbeta(self) -> int: return self._handle.nbeta
     
     @property
-    def ecutwfc(self): return self._handle.ecutwfc
+    def ecutwfc(self) -> float: return self._handle.ecutwfc
     
     @property
-    def ecutrho(self): return self._handle.ecutrho
+    def ecutrho(self) -> float: return self._handle.ecutrho
     
     @property
-    def has_so(self): return self._handle.has_so
+    def has_so(self) -> bool: return self._handle.has_so
     
     # Array properties
     @property
-    def vloc_at(self): return self._handle.vloc_at
+    def vloc_at(self) -> np.ndarray: return self._handle.vloc_at
     
     @property
-    def r(self): return self._handle.r
+    def r(self) -> np.ndarray: return self._handle.r
     
     @property
-    def rab(self): return self._handle.rab
+    def rab(self) -> np.ndarray: return self._handle.rab
     
     @property
-    def rho_atc(self): return self._handle.rho_atc
+    def rho_atc(self) -> np.ndarray: return self._handle.rho_atc
     
     @property
-    def lll(self): return self._handle.lll
+    def lll(self) -> np.ndarray: return self._handle.lll
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self._handle.__repr__()

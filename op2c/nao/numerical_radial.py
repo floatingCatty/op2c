@@ -1,12 +1,14 @@
+from __future__ import annotations
 import numpy as np
 import _op2c
+from typing import Optional, Any
 
 class NumericalRadial:
     """
     A class representing a numerical radial function defined on a grid.
     Wraps the low-level C++ _op2c.NumericalRadial class.
     """
-    def __init__(self, l: int = 0, grid: np.ndarray = None, values: np.ndarray = None, 
+    def __init__(self, l: int = 0, grid: Optional[np.ndarray] = None, values: Optional[np.ndarray] = None, 
                  itype: int = 0, symbol: str = "", handle=None):
         """
         Initialize a NumericalRadial object.
@@ -35,53 +37,53 @@ class NumericalRadial:
             self._handle.build(l, True, grid, values, 0, 0, symbol, itype, True)
 
     @property
-    def l(self):
+    def l(self) -> int:
         return self._handle.l
 
     @property
-    def symbol(self):
+    def symbol(self) -> str:
         return self._handle.symbol
 
     @property
-    def itype(self):
+    def itype(self) -> int:
         return self._handle.itype
 
     @property
-    def rgrid(self):
+    def rgrid(self) -> np.ndarray:
         """Returns the r-space grid as a numpy array."""
         return self._handle.rgrid
 
     @property
-    def rvalues(self):
+    def rvalues(self) -> np.ndarray:
         """Returns the r-space values as a numpy array."""
         return self._handle.rvalues
 
     @property
-    def kgrid(self):
+    def kgrid(self) -> np.ndarray:
         """Returns the k-space grid as a numpy array."""
         return self._handle.kgrid
 
     @property
-    def kvalues(self):
+    def kvalues(self) -> np.ndarray:
         """Returns the k-space values as a numpy array."""
         return self._handle.kvalues
         
     @property
-    def pr(self):
+    def pr(self) -> int:
         """Implicit exponent in r-values."""
         return self._handle.pr
 
     @property
-    def pk(self):
+    def pk(self) -> int:
         """Implicit exponent in k-values."""
         return self._handle.pk
 
     @property
-    def kcut(self):
+    def kcut(self) -> float:
         """K-space cutoff."""
         return self._handle.kcut
 
-    def set_grid(self, for_r_space: bool, grid: np.ndarray, mode: str = 'i'):
+    def set_grid(self, for_r_space: bool, grid: np.ndarray, mode: str = 'i') -> None:
         """
         Sets up the grid in the specified space.
         
@@ -93,7 +95,7 @@ class NumericalRadial:
         grid = np.ascontiguousarray(grid, dtype=np.float64)
         self._handle.set_grid(for_r_space, grid, mode)
 
-    def set_uniform_grid(self, for_r_space: bool, ngrid: int, cutoff: float, mode: str = 'i', enable_fft: bool = False):
+    def set_uniform_grid(self, for_r_space: bool, ngrid: int, cutoff: float, mode: str = 'i', enable_fft: bool = False) -> None:
         """
         Sets up a uniform grid.
         
@@ -106,11 +108,11 @@ class NumericalRadial:
         """
         self._handle.set_uniform_grid(for_r_space, ngrid, cutoff, mode, enable_fft)
 
-    def normalize(self):
+    def normalize(self) -> None:
         """Normalizes the radial function."""
         self._handle.normalize(True) # Normalize in r-space
 
-    def plot(self, ax=None, label=None, **kwargs):
+    def plot(self, ax: Optional[Any] = None, label: Optional[str] = None, **kwargs) -> Any:
         """
         Plot the radial function using matplotlib.
         
@@ -130,5 +132,5 @@ class NumericalRadial:
         ax.legend()
         return ax
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<NumericalRadial symbol='{self.symbol}' l={self.l} rmax={self._handle.rmax:.2f}>"

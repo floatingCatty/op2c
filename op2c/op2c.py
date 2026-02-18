@@ -1,4 +1,7 @@
 """Pythonic wrapper for Op2c two-center integral engine."""
+from __future__ import annotations
+from typing import Sequence, Optional, List, Union, Tuple
+
 import numpy as np
 import _op2c
 
@@ -13,7 +16,7 @@ class TwoCenterBundle:
         self._handle = handle or _op2c.TwoCenterBundle()
     
     @classmethod
-    def from_files(cls, orb_files, orb_dir, betas=None):
+    def from_files(cls, orb_files: List[str], orb_dir: str, betas: Optional[Sequence] = None) -> TwoCenterBundle:
         """Build bundle from orbital files and optional beta projectors.
         
         Parameters
@@ -25,17 +28,20 @@ class TwoCenterBundle:
         betas : list[BetaRadials], optional
             Beta projectors from Atom_pseudo objects.
         """
+        if orb_dir[-1] != '/':
+            orb_dir += '/'
         obj = cls()
         obj._handle.build_orb(orb_files, orb_dir)
         if betas:
             obj._handle.build_beta(betas)
         return obj
     
-    def tabulate(self):
+    def tabulate(self) -> None:
         """Build two-center integration tables (automatic grid)."""
         self._handle.tabulate()
     
-    def tabulate_with_params(self, lcao_ecut, lcao_dk, lcao_dr, lcao_rmax):
+    def tabulate_with_params(self, lcao_ecut: float, lcao_dk: float,
+                             lcao_dr: float, lcao_rmax: float) -> None:
         """Build two-center integration tables with explicit parameters."""
         self._handle.tabulate_with_params(lcao_ecut, lcao_dk, lcao_dr, lcao_rmax)
     
@@ -74,8 +80,10 @@ class Op2c:
         self._handle = handle
     
     @classmethod
-    def from_files(cls, orb_dir, orb_names, psd_dir="", psd_names=None,
-                   nspin=1, lspinorb=False, log_file="", mpi_handle=0):
+    def from_files(cls, orb_dir: str, orb_names: List[str],
+                   psd_dir: str = "", psd_names: Optional[List[str]] = None,
+                   nspin: int = 1, lspinorb: bool = False,
+                   log_file: str = "", mpi_handle: int = 0) -> Op2c:
         """Create Op2c from orbital and pseudopotential file paths.
         
         Parameters
@@ -97,6 +105,10 @@ class Op2c:
         mpi_handle : int
             MPI communicator handle (Fortran).
         """
+        if orb_dir[-1] != '/':
+            orb_dir += '/'
+        if psd_dir and psd_dir[-1] != '/':
+            psd_dir += '/'
         psd_names = psd_names or []
         ntype = len(orb_names)
         h = _op2c.Op2c(ntype, nspin, lspinorb, 
@@ -106,7 +118,8 @@ class Op2c:
         return cls(h)
     
     @classmethod
-    def from_objects(cls, orbitals, pseudos=None, nspin=1, lspinorb=False):
+    def from_objects(cls, orbitals: Sequence, pseudos: Optional[Sequence] = None,
+                     nspin: int = 1, lspinorb: bool = False) -> Op2c:
         """Create Op2c from pre-loaded AtomicRadials and AtomPseudo objects.
         
         No file I/O is performed. Both orbitals and pseudopotentials are
@@ -145,19 +158,20 @@ class Op2c:
         return cls(h)
     
     @property
-    def bundle(self):
+    def bundle(self) -> TwoCenterBundle:
         """Access the underlying TwoCenterBundle."""
         return TwoCenterBundle(self._handle.tcbd)
     
-    def get_orb_rcut_max(self, itype):
+    def get_orb_rcut_max(self, itype: int) -> float:
         """Maximum orbital cutoff radius for given atom type."""
         return self._handle.get_orb_rcut_max(itype)
     
-    def get_beta_rcut_max(self, itype):
+    def get_beta_rcut_max(self, itype: int) -> float:
         """Maximum beta projector cutoff radius for given atom type."""
         return self._handle.get_beta_rcut_max(itype)
     
-    def overlap(self, itype, jtype, Rij, transpose=False):
+    def overlap(self, itype: int, jtype: int, Rij: Sequence[float],
+                transpose: bool = False) -> np.ndarray:
         """Compute overlap integral <phi_i | phi_j>.
         
         Parameters
@@ -176,7 +190,8 @@ class Op2c:
         """
         return self._handle.overlap(itype, jtype, Rij, transpose)
     
-    def overlap_deriv(self, itype, jtype, Rij, transpose=False):
+    def overlap_deriv(self, itype: int, jtype: int, Rij: Sequence[float],
+                      transpose: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Compute overlap integral and its gradient.
         
         Returns
@@ -186,7 +201,9 @@ class Op2c:
         """
         return self._handle.overlap_deriv(itype, jtype, Rij, transpose)
     
-    def overlap_position(self, itype, jtype, Ri, Rj, transpose=False):
+    def overlap_position(self, itype: int, jtype: int,
+                         Ri: Sequence[float], Rj: Sequence[float],
+                         transpose: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Compute overlap and position operator integrals.
         
         Returns
@@ -196,7 +213,9 @@ class Op2c:
         """
         return self._handle.overlap_position(itype, jtype, Ri, Rj, transpose)
     
-    def orb_r_beta(self, itypes, ktype, Ri, Rk, transpose=False):
+    def orb_r_beta(self, itypes: Sequence[int], ktype: int,
+                   Ri: Sequence[Sequence[float]], Rk: Sequence[float],
+                   transpose: bool = False) -> Tuple[List, List, List, List]:
         """Compute orbital-beta projector integrals <phi_i | beta_k>.
         
         Returns
@@ -206,8 +225,10 @@ class Op2c:
         """
         return self._handle.orb_r_beta(itypes, ktype, Ri, Rk, transpose)
     
-    def ncomm_IKJ(self, itype, idx, ktype, jtype, jdx, 
-                  ob, oxb, oyb, ozb, npol=1, transpose=False):
+    def ncomm_IKJ(self, itype: int, idx: int, ktype: int,
+                  jtype: int, jdx: int,
+                  ob, oxb, oyb, ozb,
+                  npol: int = 1, transpose: bool = False) -> Tuple[List, List, List]:
         """Compute non-local commutator integrals [r, V_nl].
         
         Returns
