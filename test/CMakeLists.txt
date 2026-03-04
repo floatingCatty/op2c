@@ -32,3 +32,6 @@ add_op2c_test(op2c_gaunt_test test_gaunt.cpp)
 
 # Add new differential test
 add_op2c_test(op2c_diff_test test_diff.cpp)
+
+# Add concurrency test
+add_op2c_test(op2c_concurrency_test test_concurrency.cpp)
