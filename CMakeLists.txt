@@ -69,7 +69,7 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
     # BLAS/LAPACK Selection
     if(BLAS_BACKEND STREQUAL "MKL")
-        set(BLA_VENDOR "Intel10_64lp")
+        set(BLA_VENDOR "Intel10_64_dyn")
         find_package(BLAS REQUIRED)
         find_package(LAPACK REQUIRED)
         set(INT2C_USE_MKL ON)
