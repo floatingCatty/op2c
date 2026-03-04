@@ -211,7 +211,7 @@ void bind_atom_pseudo(py::module &m) {
         .def(py::init<>())
         .def("init_from_upf", [](Atom_pseudo& self, std::string filename, std::string type, double rcut, bool lspinorb, double soc_lambda) {
              ModuleBase::Logger logger; // Default logger to stdout
-             int comm = 0; // Serial mode
+             MPI_Comm comm = MPI_COMM_WORLD; // Serial mode
              
              // Split filename into directory and file name
              std::filesystem::path p(filename);
