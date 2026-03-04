@@ -9,6 +9,9 @@ project(
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake")
 include(GNUInstallDirs)
 
+# Ensure all static libraries are built with -fPIC so they can be linked into the Python extension
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 option(BUILD_TESTING "Build tests" OFF)
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   if(BUILD_TESTING)
