@@ -60,26 +60,51 @@ message(STATUS "set nao_path as ${NAO_PATH}")
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     # Options
     option(USE_OPENMP "Use OpenMP" ON)
-    set(BLAS_BACKEND "Generic" CACHE STRING "BLAS Backend (MKL, OpenBLAS, Generic)")
-    set_property(CACHE BLAS_BACKEND PROPERTY STRINGS "MKL" "OpenBLAS" "Generic")
+    set(BLAS_BACKEND "Auto" CACHE STRING "BLAS Backend (Auto, MKL, OpenBLAS, Generic)")
+    set_property(CACHE BLAS_BACKEND PROPERTY STRINGS "Auto" "MKL" "OpenBLAS" "Generic")
 
     # OpenMP
     if(USE_OPENMP)
         find_package(OpenMP REQUIRED)
         set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-        add_link_options(${OpenMP_CXX_LIBRARIES})
+        link_libraries(OpenMP::OpenMP_CXX)
+    endif()
+
+    # --- Auto-detection: resolve "Auto" to a concrete backend ---
+    if(BLAS_BACKEND STREQUAL "Auto")
+        find_library(MKL_RT_LIB NAMES mkl_rt mkl_rt.2 mkl_rt.1
+                     HINTS $ENV{MKLROOT}/lib $ENV{MKLROOT}/lib/intel64 $ENV{CONDA_PREFIX}/lib
+                     NO_DEFAULT_PATH)
+        find_library(MKL_RT_LIB NAMES mkl_rt mkl_rt.2 mkl_rt.1)
+        if(MKL_RT_LIB)
+            message(STATUS "Auto-detected MKL SDL: ${MKL_RT_LIB}")
+            set(BLAS_BACKEND "MKL")
+        else()
+            message(STATUS "MKL not found, falling back to Generic BLAS")
+            set(BLAS_BACKEND "Generic")
+        endif()
     endif()
 
     # BLAS/LAPACK Selection
     if(BLAS_BACKEND STREQUAL "MKL")
-        set(BLA_VENDOR "Intel10_64_dyn")
-        find_package(BLAS REQUIRED)
-        find_package(LAPACK REQUIRED)
         set(INT2C_USE_MKL ON)
         add_compile_definitions(__MKL RSATB_USE_MKL)
         if(DEFINED ENV{MKLROOT})
             include_directories($ENV{MKLROOT}/include)
         endif()
+        if(NOT MKL_RT_LIB)
+            find_library(MKL_RT_LIB NAMES mkl_rt mkl_rt.2 mkl_rt.1
+                         HINTS $ENV{MKLROOT}/lib $ENV{MKLROOT}/lib/intel64 $ENV{CONDA_PREFIX}/lib)
+        endif()
+        if(NOT MKL_RT_LIB)
+            message(FATAL_ERROR "BLAS_BACKEND=MKL but libmkl_rt.so not found. "
+                    "Set BLAS_BACKEND=Auto or Generic, or install MKL.")
+        endif()
+        message(STATUS "Using MKL SDL: ${MKL_RT_LIB}")
+        add_library(BLAS::BLAS INTERFACE IMPORTED)
+        set_target_properties(BLAS::BLAS PROPERTIES INTERFACE_LINK_LIBRARIES "${MKL_RT_LIB}")
+        add_library(LAPACK::LAPACK INTERFACE IMPORTED)
+        set_target_properties(LAPACK::LAPACK PROPERTIES INTERFACE_LINK_LIBRARIES "${MKL_RT_LIB}")
     elseif(BLAS_BACKEND STREQUAL "OpenBLAS")
         set(BLA_VENDOR "OpenBLAS")
         find_package(BLAS REQUIRED)
