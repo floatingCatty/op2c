@@ -1,6 +1,7 @@
 #include "pseudopotential/io/read_pseudo.h"
 // #include "source_io/module_parameter/parameter.h"
 // #include "math/global_file.h"
+#include "io/rescumat_mat.h"
 #include "pseudopotential/io/read_pp.h"
 // #include "pseudopotential/atom_spec.h"
 // #include "pseudopotential/bcast_cell.h"
@@ -9,24 +10,14 @@
 #include "utils/log.h"
 
 #include <cstring> // Peize Lin fix bug about strcmp 2016-08-02
+#include <exception>
+#include <iostream>
+#include <stdexcept>
 
 void read_pseudo(const std::string& pp_dir, const std::vector<std::string> pp_name, const std::string& pp_type, 
     const double rcut, const bool lspinorb, const double& soc_lambda,
     const ModuleBase::Logger& logger, std::vector<Atom_pseudo>& pseudos, MPI_Comm comm)
 {
-    // read in non-local pseudopotential and ouput the projectors.
-    logger.info() << "\n\n";
-    logger.info() << " >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" << std::endl;
-    logger.info() << " |                                                                    |" << std::endl;
-    logger.info() << " |                 #Read Pseudopotentials Files#                      |" << std::endl;
-    logger.info() << " | ABACUS supports norm-conserving (NC) pseudopotentials for both     |" << std::endl;
-    logger.info() << " | plane wave basis and numerical atomic orbital basis sets.          |" << std::endl;
-    logger.info() << " | In addition, ABACUS supports ultrasoft pseudopotentials (USPP)     |" << std::endl;
-    logger.info() << " | for plane wave basis set.                                          |" << std::endl;
-    logger.info() << " |                                                                    |" << std::endl;
-    logger.info() << " <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" << std::endl;
-    logger.info() << "\n";
-
     int ntype = pseudos.size();
     int rank = 0;
 #ifdef __MPI
@@ -374,6 +365,7 @@ void read_atom_pseudopots(const std::string& pp_dir, const std::string& pp_name,
     // Read in the atomic pseudo potentials
     std::string pp_address;
     Pseudopot_upf upf;
+    const bool read_rescumat_mat = RescumatMat::has_mat_suffix(pp_name) || pp_type == "mat";
     // upf.coulomb_potential = ucelly.atoms[i].coulomb_potential;
 
     // mohan update 2010-09-12
@@ -383,20 +375,38 @@ void read_atom_pseudopots(const std::string& pp_dir, const std::string& pp_name,
     if (rank == 0)
     {
         pp_address = pp_dir + pp_name;
-        std::string pp_type_copy = pp_type;
-        error = upf.init_pseudo_reader(pp_address, pp_type_copy, atom_pseudo); // xiaohui add 2013-06-23
-
-        if (error == 0) // mohan add 2021-04-16
+        if (read_rescumat_mat)
         {
-            // if (ucell.atoms[i].flag_empty_element) // Peize Lin add for bsse 2021.04.07
-            // {
-            //     upf.set_empty_element(ucell.atoms[i].ncpp);
-            // }
-            upf.set_upf_q(atom_pseudo); // liuyu add 2023-09-21
-            // average pseudopotential if needed
-            error_ap = upf.average_p(soc_lambda, lspinorb, atom_pseudo); // added by zhengdy 2020-10-20
+            try
+            {
+                const auto data = RescumatMat::read_atomic_data(pp_address);
+                RescumatMat::fill_atom_pseudo_from_atomic_data(data, atom_pseudo, rcut);
+                atom_pseudo.coulomb_potential = false;
+            }
+            catch (const std::exception& exc)
+            {
+                std::cerr << "Failed to read rescumat MAT pseudopotential " << pp_address
+                          << ": " << exc.what() << std::endl;
+                error = 2;
+            }
         }
-        atom_pseudo.coulomb_potential = upf.coulomb_potential;
+        else
+        {
+            std::string pp_type_copy = pp_type;
+            error = upf.init_pseudo_reader(pp_address, pp_type_copy, atom_pseudo); // xiaohui add 2013-06-23
+
+            if (error == 0) // mohan add 2021-04-16
+            {
+                // if (ucell.atoms[i].flag_empty_element) // Peize Lin add for bsse 2021.04.07
+                // {
+                //     upf.set_empty_element(ucell.atoms[i].ncpp);
+                // }
+                upf.set_upf_q(atom_pseudo); // liuyu add 2023-09-21
+                // average pseudopotential if needed
+                error_ap = upf.average_p(soc_lambda, lspinorb, atom_pseudo); // added by zhengdy 2020-10-20
+            }
+            atom_pseudo.coulomb_potential = upf.coulomb_potential;
+        }
     }
 
 #ifdef __MPI
@@ -441,9 +451,12 @@ void read_atom_pseudopots(const std::string& pp_dir, const std::string& pp_name,
 
     if (rank == 0)
     {
-        upf.complete_default(atom_pseudo, rcut);
+        if (!read_rescumat_mat)
+        {
+            upf.complete_default(atom_pseudo, rcut);
+        }
         std::cout << "Pseudopotential file" << " " << pp_address << std::endl;
-        std::cout << "Pseudopotential type" << " " << pp_type << std::endl;
+        std::cout << "Pseudopotential type" << " " << (read_rescumat_mat ? "mat" : pp_type) << std::endl;
         std::cout << "Exchange-correlation functional" << " " << atom_pseudo.xc_func << std::endl;
         std::cout << "Nonlocal core correction" << " " << atom_pseudo.xc_func << std::endl;
         std::cout << "Valence electrons" << " " << atom_pseudo.zv << std::endl;

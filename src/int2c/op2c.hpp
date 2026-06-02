@@ -110,6 +110,24 @@ public:
     void overlap(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx = nullptr, std::vector<double>* dvy = nullptr, std::vector<double>* dvz = nullptr);
 
     /*!
+     * @brief Computes the kinetic-energy integral T_ij = < phi_i | -1/2 nabla^2 | phi_j >.
+     *
+     * Hartree atomic units; the prefactor -1/2 is included in the 'T' tabulation
+     * tag of TwoCenterIntegrator. The block layout mirrors overlap() exactly so
+     * callers can sum H = T + V_loc + V_nl block-by-block.
+     *
+     * @param itype Element type index of atom i.
+     * @param jtype Element type index of atom j.
+     * @param Rij Displacement vector R_j - R_i.
+     * @param is_transpose If true, the result blocks are transposed.
+     * @param[out] v Flattened output array for T values. Size [block_i * block_j].
+     * @param[out] dvx (Optional) x-component of the gradient dT/dR.
+     * @param[out] dvy (Optional) y-component of the gradient dT/dR.
+     * @param[out] dvz (Optional) z-component of the gradient dT/dR.
+     */
+    void kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx = nullptr, std::vector<double>* dvy = nullptr, std::vector<double>* dvz = nullptr);
+
+    /*!
      * @brief Computes overlap and position operator integrals simultaneously.
      *
      * Computes < phi_i | phi_j > and < phi_i | r | phi_j >.
@@ -184,4 +202,31 @@ public:
 
     double get_orb_rcut_max(int itype) const;
     double get_beta_rcut_max(int itype) const;
+
+    /*!
+     * @brief Number of distinct (l, zeta) projector channels for element ``itype``.
+     *
+     * For an ONCV C pseudo with 2 s + 2 p projectors this returns 4; the
+     * total m-resolved projector count is ``beta_radials.nphi(itype)`` which
+     * equals 8 (= 2*1 + 2*3).
+     */
+    int beta_nbeta(int itype) const;
+
+    /*!
+     * @brief Angular momentum (l) of each projector channel for element ``itype``.
+     *
+     * Length is ``beta_nbeta(itype)``. Used to expand the channel-space D
+     * matrix into the m-resolved space matching ``orb_r_beta`` output blocks.
+     */
+    std::vector<int> beta_lll(int itype) const;
+
+    /*!
+     * @brief Channel-space projector strength matrix ``D`` for element ``itype``.
+     *
+     * Stored in the ``Atom_pseudo::d_real`` field (sized
+     * ``beta_nbeta * beta_nbeta``). Caller flattens row-major; the matrix is
+     * used in ``V_nl = sum_K |beta_K> D_K <beta_K|`` after m-expansion. The
+     * flattening matches the binding convention used by ``Op2c::overlap``.
+     */
+    std::vector<double> beta_dion(int itype) const;
 };

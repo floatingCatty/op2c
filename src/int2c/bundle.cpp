@@ -83,9 +83,12 @@ void TwoCenterBundle::tabulate()
     if (orbm_) { orbm_->set_uniform_grid(true, nr, cutoff, 'i', true); }
 
     // build TwoCenterIntegrator objects
-    // kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
-    // kinetic_orb->tabulate(*orb_, *orb_, 'T', nr, cutoff);
-    // ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
+    // 'T' tag selects the kinetic integral (op_pk = -2 in table.cpp), matching
+    // the documented Operator type codes in integrator.h ('S' overlap,
+    // 'T' kinetic, 'R' position).
+    kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
+    kinetic_orb->tabulate(*orb_, *orb_, 'T', nr, cutoff);
+    ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
 
     overlap_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
     overlap_orb->tabulate(*orb_, *orbp_, *orbm_, nr, cutoff);
@@ -151,13 +154,14 @@ void TwoCenterBundle::tabulate(const double lcao_ecut,
     if (orbp_) { orbp_->set_grid(false, nk, kgrid.data(), 't'); }
     if (orbm_) { orbm_->set_grid(false, nk, kgrid.data(), 't'); }
 
-    // "st" stands for overlap (s) and kinetic (t)
+    // "st" stands for overlap (s) and kinetic (t); both share the same nr/cutoff
+    // because they are tabulated against the same orbital radial collection.
     const double cutoff_st = std::min(lcao_rmax, 2.0 * orb_->rcut_max());
     const int nr_st = static_cast<int>(cutoff_st / lcao_dr) + 5;
 
-    // kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
-    // kinetic_orb->tabulate(*orb_, *orb_, 'T', nr_st, cutoff_st);
-    // ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
+    kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
+    kinetic_orb->tabulate(*orb_, *orb_, 'T', nr_st, cutoff_st);
+    ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
 
     overlap_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
     overlap_orb->tabulate(*orb_, *orbp_, *orbm_, nr_st, cutoff_st);

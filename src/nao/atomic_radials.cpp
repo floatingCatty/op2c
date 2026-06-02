@@ -1,5 +1,6 @@
 #include "nao/atomic_radials.h"
 
+#include "io/rescumat_mat.h"
 #include "math/math_integral.h"
 
 // FIXME: should update with pyabacus
@@ -10,8 +11,79 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <numeric>
 #include <algorithm>
+#include <utility>
+
+namespace
+{
+
+#ifdef __MPI
+void bcast_vector(std::vector<double>& values, MPI_Comm comm)
+{
+    int size = static_cast<int>(values.size());
+    Parallel_Common::bcast_int(size, comm);
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    if (rank != 0)
+    {
+        values.resize(size);
+    }
+    if (size > 0)
+    {
+        Parallel_Common::bcast_double(values.data(), size, comm);
+    }
+}
+
+void bcast_rescumat_radial(RescumatMat::RadialData& radial, MPI_Comm comm)
+{
+    Parallel_Common::bcast_int(radial.angular_momentum, comm);
+    Parallel_Common::bcast_int(radial.principal_quantum_number, comm);
+    Parallel_Common::bcast_double(radial.energy, comm);
+    Parallel_Common::bcast_double(radial.population, comm);
+    Parallel_Common::bcast_double(radial.kb_energy, comm);
+    Parallel_Common::bcast_double(radial.kb_cosine, comm);
+    Parallel_Common::bcast_bool(radial.is_ghost, comm);
+    bcast_vector(radial.r_grid, comm);
+    bcast_vector(radial.r_values, comm);
+    bcast_vector(radial.q_grid, comm);
+}
+
+void bcast_rescumat_atomic_data(RescumatMat::AtomicData& data, MPI_Comm comm)
+{
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+
+    Parallel_Common::bcast_string(data.symbol, comm);
+    Parallel_Common::bcast_int(data.atomic_number, comm);
+    Parallel_Common::bcast_double(data.valence_electrons, comm);
+
+    int orbital_count = static_cast<int>(data.orbitals.size());
+    Parallel_Common::bcast_int(orbital_count, comm);
+    if (rank != 0)
+    {
+        data.orbitals.resize(orbital_count);
+    }
+    for (auto& orbital : data.orbitals)
+    {
+        bcast_rescumat_radial(orbital, comm);
+    }
+
+    int projector_count = static_cast<int>(data.projectors.size());
+    Parallel_Common::bcast_int(projector_count, comm);
+    if (rank != 0)
+    {
+        data.projectors.resize(projector_count);
+    }
+    for (auto& projector : data.projectors)
+    {
+        bcast_rescumat_radial(projector, comm);
+    }
+}
+#endif
+
+} // namespace
 
 AtomicRadials& AtomicRadials::operator=(const AtomicRadials& rhs)
 {
@@ -24,6 +96,14 @@ void AtomicRadials::build(const std::string& file, const int itype, const int p,
 {
     // deallocates all arrays and reset variables (excluding sbt_)
     cleanup();
+    itype_ = itype;
+
+    if (RescumatMat::has_mat_suffix(file))
+    {
+        read_rescumat_mat(file, p, pm, ptr_logger, comm);
+        set_rcut_max();
+        return;
+    }
 
     std::ifstream ifs;
     bool is_open = false;
@@ -61,13 +141,111 @@ void AtomicRadials::build(const std::string& file, const int itype, const int p,
         ptr_logger->info() << "\n\n\n\n";
     }
 
-    itype_ = itype;
     read_abacus_orb(ifs, p, pm, ptr_logger, comm);
     set_rcut_max();
 
     if (rank == 0)
     {
         ifs.close();
+    }
+}
+
+void AtomicRadials::read_rescumat_mat(const std::string& file,
+                                      const int p,
+                                      const int pm,
+                                      const ModuleBase::Logger* ptr_logger,
+                                      MPI_Comm comm)
+{
+    int rank = 0;
+#ifdef __MPI
+    MPI_Comm_rank(comm, &rank);
+#endif
+
+    if (ptr_logger)
+    {
+        ptr_logger->info() << "\n\n\n\n";
+        ptr_logger->info() << " >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" << std::endl;
+        ptr_logger->info() << " |               SETUP RESCUMAT MAT ORBITALS                       |" << std::endl;
+        ptr_logger->info() << " <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" << std::endl;
+        ptr_logger->info() << "\n\n\n\n";
+    }
+
+    RescumatMat::AtomicData data;
+    if (rank == 0)
+    {
+        data = RescumatMat::read_atomic_data(file);
+    }
+#ifdef __MPI
+    bcast_rescumat_atomic_data(data, comm);
+#endif
+
+    symbol_ = data.symbol;
+    orb_ecut_ = RescumatMat::infer_energy_cutoff_ry(data.orbitals);
+
+    std::vector<RescumatMat::RadialData> shifted_orbitals;
+    shifted_orbitals.reserve(data.orbitals.size());
+    for (const auto& orbital : data.orbitals)
+    {
+        RescumatMat::RadialData shifted = orbital;
+        shifted.angular_momentum += pm;
+        if (shifted.angular_momentum >= 0)
+        {
+            shifted_orbitals.push_back(std::move(shifted));
+        }
+    }
+    if (shifted_orbitals.empty())
+    {
+        throw std::runtime_error("rescumat MAT orbital file has no orbitals after angular momentum shift: " + file);
+    }
+
+    lmax_ = -1;
+    lmin_ = 99999;
+    for (const auto& orbital : shifted_orbitals)
+    {
+        lmax_ = std::max(lmax_, orbital.angular_momentum);
+        lmin_ = std::min(lmin_, orbital.angular_momentum);
+    }
+
+    nzeta_ = new int[lmax_ + 1];
+    norb_ = new int[lmax_ + 1];
+    std::fill(nzeta_, nzeta_ + lmax_ + 1, 0);
+    std::fill(norb_, norb_ + lmax_ + 1, 0);
+    for (const auto& orbital : shifted_orbitals)
+    {
+        nzeta_[orbital.angular_momentum] += 1;
+    }
+
+    nchi_ = 0;
+    nphi_ = 0;
+    nzeta_max_ = 0;
+    for (int l = 0; l <= lmax_; ++l)
+    {
+        nchi_ += nzeta_[l];
+        norb_[l] = nzeta_[l] * (2 * l + 1);
+        nphi_ += norb_[l];
+        nzeta_max_ = std::max(nzeta_max_, nzeta_[l]);
+    }
+    indexing();
+
+    chi_ = new NumericalRadial[nchi_];
+    std::vector<int> next_zeta(lmax_ + 1, 0);
+    for (const auto& orbital : shifted_orbitals)
+    {
+        const int l = orbital.angular_momentum;
+        const int izeta = next_zeta[l]++;
+        chi_[index(l, izeta)].build(
+            l,
+            true,
+            static_cast<int>(orbital.r_grid.size()),
+            orbital.r_grid.data(),
+            orbital.r_values.data(),
+            p,
+            izeta,
+            symbol_,
+            itype_,
+            false
+        );
+        chi_[index(l, izeta)].normalize();
     }
 }
 

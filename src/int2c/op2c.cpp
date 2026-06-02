@@ -187,9 +187,81 @@ void Op2c::overlap(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, 
     if (grad_out != nullptr) delete[] grad_out;
 }
 
+void Op2c::kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx, std::vector<double>* dvy, std::vector<double>* dvz)
+{
+    // Block-by-block kinetic integral, mirroring Op2c::overlap. The only
+    // difference is the tabulator: tcbd.kinetic_orb was tabulated with the
+    // 'T' tag (op_pk = -2 in table.cpp), so calculate(...) returns
+    // < phi_i | -1/2 nabla^2 | phi_j > in Hartree.
+    int inorb, jnorb;
+    inorb = tcbd.orb_->nphi(itype);
+    jnorb = tcbd.orb_->nphi(jtype);
+    int il, izeta, im;
+    int jl, jzeta, jm;
+    int shift, m_phase;
+    double* grad_out=nullptr;
+
+    if (dvx!=nullptr || dvy!=nullptr || dvz!=nullptr){
+        grad_out = new double[3];
+    }
+
+    if (v.size() < inorb * jnorb){
+        std::cout << "Warning: v.size() " << v.size() << " < inorb * jnorb: " << inorb * jnorb << std::endl;
+        v.resize(inorb * jnorb);
+    } else if (v.size() > inorb * jnorb){
+        std::cout << "Warning: v.size() " << v.size() << " > inorb * jnorb: " << inorb * jnorb << std::endl;
+    }
+    if (dvx != nullptr){
+        if (dvx->size() < inorb * jnorb){
+            dvx->resize(inorb * jnorb);
+        }
+    }
+    if (dvy != nullptr){
+        if (dvy->size() < inorb * jnorb){
+            dvy->resize(inorb * jnorb);
+        }
+    }
+    if (dvz != nullptr){
+        if (dvz->size() < inorb * jnorb){
+            dvz->resize(inorb * jnorb);
+        }
+    }
+
+    for(int i=0; i<inorb; ++i){
+        for(int j=0; j<jnorb; ++j){
+            if (is_transpose){
+                shift = j * inorb + i;
+            } else {
+                shift = i * jnorb + j;
+            }
+
+            il = orb_map.get_value<int>(itype, i, 0);
+            izeta = orb_map.get_value<int>(itype, i, 1);
+            im = orb_map.get_value<int>(itype, i, 2);
+            jl = orb_map.get_value<int>(jtype, j, 0);
+            jzeta = orb_map.get_value<int>(jtype, j, 1);
+            jm = orb_map.get_value<int>(jtype, j, 2);
+            tcbd.kinetic_orb->calculate(itype, il, izeta, im, jtype, jl, jzeta, jm, Rij, v.data()+shift, grad_out);
+
+            m_phase = (im+jm) % 2 == 0 ? 1 : -1;
+            v.data()[shift] *= m_phase;
+            if (grad_out != nullptr) {
+                grad_out[0] *= m_phase;
+                grad_out[1] *= m_phase;
+                grad_out[2] *= m_phase;
+            }
+
+            if (dvx != nullptr) dvx->data()[shift] = grad_out[0];
+            if (dvy != nullptr) dvy->data()[shift] = grad_out[1];
+            if (dvz != nullptr) dvz->data()[shift] = grad_out[2];
+        }
+    }
+    if (grad_out != nullptr) delete[] grad_out;
+}
+
 void Op2c::overlap_position(
-    size_t itype, size_t jtype, 
-    ModuleBase::Vector3<double> Ri, ModuleBase::Vector3<double> Rj, 
+    size_t itype, size_t jtype,
+    ModuleBase::Vector3<double> Ri, ModuleBase::Vector3<double> Rj,
     bool is_transpose,
     // output
     std::vector<double>& v, std::vector<double>& vx, std::vector<double>& vy, std::vector<double>& vz
@@ -446,4 +518,41 @@ double Op2c::get_beta_rcut_max(int itype) const {
     if(tcbd.beta_)
         return tcbd.beta_->rcut_max(itype);
     return 0.0;
+}
+
+int Op2c::beta_nbeta(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_nbeta: itype out of range");
+    }
+    return psds[itype].nbeta;
+}
+
+std::vector<int> Op2c::beta_lll(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_lll: itype out of range");
+    }
+    const auto& pp = psds[itype];
+    std::vector<int> out(pp.nbeta);
+    for (int i = 0; i < pp.nbeta; ++i) {
+        out[i] = pp.lll[i];
+    }
+    return out;
+}
+
+std::vector<double> Op2c::beta_dion(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_dion: itype out of range");
+    }
+    const auto& pp = psds[itype];
+    const int n = pp.nbeta;
+    std::vector<double> out(n * n);
+    // psds[itype].d_real is a ModuleBase::matrix sized (nbeta, nbeta); copy
+    // into a row-major std::vector so the binding can produce a numpy array
+    // with shape (nbeta, nbeta).
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            out[i * n + j] = pp.d_real(i, j);
+        }
+    }
+    return out;
 }

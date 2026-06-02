@@ -1,8 +1,13 @@
 import numpy as np
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from op2c.nao import NumericalRadial, AtomicRadials
 from op2c.pseudo import AtomPseudo, BetaRadials
 import _op2c
+
+TEST_DIR = Path(__file__).resolve().parents[1]
+C_ORBITAL = TEST_DIR / "test" / "pporb" / "C_gga_7au_100Ry_2s2p1d.orb"
 
 
 class TestNumericalRadial(unittest.TestCase):
@@ -47,6 +52,29 @@ class TestNumericalRadial(unittest.TestCase):
         nr = NumericalRadial(l=0, grid=r, values=vals)
         self.assertEqual(nr.pr, 0)
         self.assertEqual(nr.pk, 0)
+
+    def test_rvalue_interpolation(self):
+        """rvalue_at and rvalues_at should use the C++ radial interpolator."""
+        r = np.linspace(0, 4, 5)
+        vals = 2.0 * r + 1.0
+        nr = NumericalRadial(l=0, grid=r, values=vals)
+
+        self.assertAlmostEqual(nr.rvalue_at(1.5), 4.0)
+        out = nr.rvalues_at(np.array([0.5, 2.5, 5.0]))
+        self.assertTrue(np.allclose(out, np.array([2.0, 6.0, 0.0])))
+
+
+class TestAtomicRadials(unittest.TestCase):
+    """Test AtomicRadials orbital evaluation."""
+
+    def test_evaluate_orbitals_from_file(self):
+        """AtomicRadials should evaluate orbitals in C++."""
+        orbitals = AtomicRadials.from_file(str(C_ORBITAL))
+        values = orbitals.evaluate_orbitals(np.array([[0.1, 0.2, 0.3], [8.0, 0.0, 0.0]]))
+
+        self.assertEqual(values.shape, (2, orbitals.nphi))
+        self.assertTrue(np.all(np.isfinite(values)))
+        self.assertTrue(np.any(np.abs(values[0]) > 0.0))
 
 
 class TestAtomPseudo(unittest.TestCase):
@@ -141,6 +169,82 @@ class TestLowLevelBindings(unittest.TestCase):
         self.assertTrue(hasattr(ap, 'vloc_at'))
         self.assertTrue(hasattr(ap, 'd_so'))
 
+    def test_low_level_radial_interpolation(self):
+        """Low-level NumericalRadial should expose r-space interpolation."""
+        r = np.linspace(0, 4, 5)
+        vals = 2.0 * r + 1.0
+        nr = _op2c.NumericalRadial()
+        nr.build(0, True, r, vals, 0, 0, "H", 0, True)
+
+        self.assertAlmostEqual(nr.rvalue_at(1.5), 4.0)
+        self.assertTrue(np.allclose(nr.rvalues_at(np.array([1.0, 3.0])), [3.0, 7.0]))
+
+    def test_real_spherical_harmonics_binding(self):
+        """Low-level module should expose ModuleBase::Ylm real harmonics."""
+        ylm = _op2c.real_spherical_harmonics(2, np.array([0.0, 0.0, 1.0]))
+
+        self.assertEqual(ylm.shape, (9,))
+        self.assertAlmostEqual(ylm[_op2c.ylm_real_index(0, 0)], 1.0 / np.sqrt(4.0 * np.pi))
+        self.assertEqual(_op2c.ylm_real_index(1, 1), 2)
+        self.assertEqual(_op2c.ylm_real_index(1, -1), 3)
+
+    def test_real_spherical_harmonics_threaded_matches_serial(self):
+        """Concurrent Ylm calls should match a serial reference."""
+        points = np.column_stack(
+            (
+                np.linspace(0.1, 1.7, 64),
+                np.linspace(-0.4, 0.9, 64),
+                np.linspace(0.2, 2.1, 64),
+            )
+        )
+        expected = _op2c.real_spherical_harmonics(4, points)
+
+        def worker(_):
+            out = expected
+            for _ in range(20):
+                out = _op2c.real_spherical_harmonics(4, points)
+            return out
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(worker, range(8)))
+
+        for result in results:
+            self.assertTrue(np.allclose(result, expected, rtol=0.0, atol=0.0))
+
+    def test_low_level_atomic_orbital_evaluation(self):
+        """Low-level AtomicRadials should expose C++ orbital values."""
+        orbitals = _op2c.AtomicRadials()
+        orbitals.build(str(C_ORBITAL), 0, 0, 0)
+        values = orbitals.evaluate_orbitals(np.array([[0.1, 0.2, 0.3]]))
+
+        self.assertEqual(values.shape, (1, orbitals.nphi))
+        self.assertTrue(np.any(np.abs(values) > 0.0))
+
+    def test_low_level_atomic_orbital_evaluation_threaded_matches_serial(self):
+        """Concurrent orbital-value calls should match a serial reference."""
+        orbitals = _op2c.AtomicRadials()
+        orbitals.build(str(C_ORBITAL), 0, 0, 0)
+        points = np.column_stack(
+            (
+                np.linspace(0.05, 2.0, 48),
+                np.linspace(-0.3, 0.8, 48),
+                np.linspace(0.1, 1.4, 48),
+            )
+        )
+        expected = orbitals.evaluate_orbitals(points)
+
+        def worker(_):
+            out = expected
+            for _ in range(12):
+                out = orbitals.evaluate_orbitals(points)
+            return out
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(worker, range(8)))
+
+        for result in results:
+            self.assertTrue(np.allclose(result, expected, rtol=0.0, atol=0.0))
+
 
 class TestRadialCollection(unittest.TestCase):
     """Test RadialCollection binding."""
@@ -208,4 +312,3 @@ class TestOp2cWrapper(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

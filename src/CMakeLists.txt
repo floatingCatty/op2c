@@ -65,12 +65,13 @@ endif()
 # --- NAO Core ---
 
 add_library(nao_core
+    io/rescumat_mat.cpp
     nao/radial_function.cpp
     nao/orbital_shell.cpp
     nao/atomic_basis.cpp
     nao/atomic_radials.cpp # Check if needed or legacy
 )
-target_link_libraries(nao_core PUBLIC nao_math)
+target_link_libraries(nao_core PUBLIC nao_math MATIO::MATIO)
 
 # --- Pseudopotential ---
 

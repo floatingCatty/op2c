@@ -83,6 +83,23 @@ class NumericalRadial:
         """K-space cutoff."""
         return self._handle.kcut
 
+    def rvalue_at(self, r_bohr: float) -> float:
+        """Return the interpolated r-space value at one radius in Bohr."""
+        return float(self._handle.rvalue_at(float(r_bohr)))
+
+    def rvalues_at(self, r_bohr: np.ndarray) -> np.ndarray:
+        """Return interpolated r-space values at radii in Bohr."""
+        radii = np.ascontiguousarray(r_bohr, dtype=np.float64)
+        return self._handle.rvalues_at(radii)
+
+    def value_at(self, r_bohr: float) -> float:
+        """Alias for rvalue_at."""
+        return self.rvalue_at(r_bohr)
+
+    def values_at(self, r_bohr: np.ndarray) -> np.ndarray:
+        """Alias for rvalues_at."""
+        return self.rvalues_at(r_bohr)
+
     def set_grid(self, for_r_space: bool, grid: np.ndarray, mode: str = 'i') -> None:
         """
         Sets up the grid in the specified space.

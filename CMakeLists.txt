@@ -40,6 +40,25 @@ else()
   # Actually, base relies on __MPI definition. 
   # If we want serial build, we must NOT define __MPI.
 endif()
+
+find_path(MATIO_INCLUDE_DIR
+    NAMES matio.h
+    HINTS $ENV{CONDA_PREFIX}/include
+)
+find_library(MATIO_LIBRARY
+    NAMES matio
+    HINTS $ENV{CONDA_PREFIX}/lib
+)
+if(NOT MATIO_INCLUDE_DIR OR NOT MATIO_LIBRARY)
+    message(FATAL_ERROR "libmatio is required for rescumat *_AtomicData.mat support. "
+                        "Install conda-forge::libmatio in the rescupp conda environment.")
+endif()
+add_library(MATIO::MATIO UNKNOWN IMPORTED)
+set_target_properties(MATIO::MATIO PROPERTIES
+    IMPORTED_LOCATION "${MATIO_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${MATIO_INCLUDE_DIR}"
+)
+message(STATUS "Using libmatio: ${MATIO_LIBRARY}")
 # # include_directories(${MPI_CXX_INCLUDE_PATH})
 # add_compile_definitions(__MPI)
 # add_compile_definitions(__LCAO)

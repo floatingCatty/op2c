@@ -1,18 +1,230 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <algorithm>
+#include <cstring>
+#include <cmath>
+#include <memory>
 #include "int2c/op2c.hpp"
+#include "math/interpolation/cubic_spline.h"
 #include "nao/radial_function.h"
 #include "nao/atomic_radials.h"
 #include "pseudopotential/pseudo_atom.h"
 #include "pseudopotential/beta_projectors.h"
 #include "math/linalg/matrix.h"
 #include "math/linalg/vector3.h"
+#include "math/ylm.h"
 #include "pseudopotential/io/read_pseudo.h"
 #include "utils/log.h"
+#include <cstdlib>
 #include <filesystem>
 
 namespace py = pybind11;
+
+namespace {
+
+double rvalue_at(const NumericalRadial& radial, const double r) {
+    if (!std::isfinite(r)) {
+        throw std::runtime_error("NumericalRadial.rvalue_at requires a finite radius");
+    }
+    if (radial.nr() < 2) {
+        throw std::runtime_error("NumericalRadial.rvalue_at requires an r-space grid");
+    }
+    if (r < radial.rgrid(0) || r > radial.rmax()) {
+        return 0.0;
+    }
+    ModuleBase::CubicSpline spline(radial.nr(), radial.rgrid(), radial.rvalue());
+    double out = 0.0;
+    spline.eval(1, &r, &out);
+    return out;
+}
+
+py::array_t<double> rvalues_at(const NumericalRadial& radial, py::array_t<double, py::array::c_style | py::array::forcecast> radii) {
+    auto buf = radii.request();
+    std::vector<py::ssize_t> shape = buf.shape;
+    py::array_t<double> out(shape);
+    auto out_buf = out.request();
+
+    const auto* in = static_cast<const double*>(buf.ptr);
+    auto* result = static_cast<double*>(out_buf.ptr);
+
+    if (radial.nr() < 2) {
+        throw std::runtime_error("NumericalRadial.rvalues_at requires an r-space grid");
+    }
+    ModuleBase::CubicSpline spline(radial.nr(), radial.rgrid(), radial.rvalue());
+    for (py::ssize_t i = 0; i < buf.size; ++i) {
+        const double r = in[i];
+        if (!std::isfinite(r)) {
+            throw std::runtime_error("NumericalRadial.rvalues_at requires finite radii");
+        }
+        if (r < radial.rgrid(0) || r > radial.rmax()) {
+            result[i] = 0.0;
+        } else {
+            spline.eval(1, &r, &result[i]);
+        }
+    }
+    return out;
+}
+
+int ylm_real_index(const int l, const int m) {
+    if (l < 0 || std::abs(m) > l) {
+        throw std::runtime_error("ylm_real_index requires l >= 0 and |m| <= l");
+    }
+    const int base = l * l;
+    if (m == 0) {
+        return base;
+    }
+    if (m > 0) {
+        return base + 2 * m - 1;
+    }
+    return base + 2 * (-m);
+}
+
+py::array_t<double> real_spherical_harmonics(const int lmax, py::array_t<double, py::array::c_style | py::array::forcecast> xyz) {
+    if (lmax < 0) {
+        throw std::runtime_error("real_spherical_harmonics requires lmax >= 0");
+    }
+    auto buf = xyz.request();
+    const auto* data = static_cast<const double*>(buf.ptr);
+    const int width = (lmax + 1) * (lmax + 1);
+
+    if (buf.ndim == 1) {
+        if (buf.shape[0] != 3) {
+            throw std::runtime_error("real_spherical_harmonics expects xyz with shape (3,) or (n, 3)");
+        }
+        py::array_t<double> out({width});
+        auto out_buf = out.request();
+        auto* result = static_cast<double*>(out_buf.ptr);
+        ModuleBase::Vector3<double> vec(data[0], data[1], data[2]);
+        {
+            py::gil_scoped_release release;
+            ModuleBase::Ylm::get_ylm_real(lmax + 1, vec, result);
+        }
+        return out;
+    }
+
+    if (buf.ndim != 2 || buf.shape[1] != 3) {
+        throw std::runtime_error("real_spherical_harmonics expects xyz with shape (3,) or (n, 3)");
+    }
+
+    const py::ssize_t n = buf.shape[0];
+    py::array_t<double> out({n, static_cast<py::ssize_t>(width)});
+    auto out_buf = out.request();
+    auto* result = static_cast<double*>(out_buf.ptr);
+    {
+        py::gil_scoped_release release;
+        for (py::ssize_t i = 0; i < n; ++i) {
+            ModuleBase::Vector3<double> vec(data[3 * i], data[3 * i + 1], data[3 * i + 2]);
+            ModuleBase::Ylm::get_ylm_real(lmax + 1, vec, result + width * i);
+        }
+    }
+    return out;
+}
+
+py::array_t<double> evaluate_atomic_orbitals(AtomicRadials& radials, py::array_t<double, py::array::c_style | py::array::forcecast> xyz) {
+    auto buf = xyz.request();
+    if (buf.ndim != 2 || buf.shape[1] != 3) {
+        throw std::runtime_error("AtomicRadials.evaluate_orbitals expects xyz_bohr with shape (n, 3)");
+    }
+    const auto* coords = static_cast<const double*>(buf.ptr);
+    const py::ssize_t n_point = buf.shape[0];
+    const int n_phi = radials.nphi();
+    const int lmax = radials.lmax();
+
+    struct RadialEval {
+        const NumericalRadial* radial;
+        std::unique_ptr<ModuleBase::CubicSpline> spline;
+    };
+    struct OrbitalEval {
+        std::size_t radial_index;
+        int l;
+        int m;
+    };
+    std::vector<RadialEval> radial_evals;
+    std::vector<OrbitalEval> orbitals;
+    orbitals.reserve(n_phi);
+    for (int l = 0; l <= lmax; ++l) {
+        for (int izeta = 0; izeta < radials.nzeta(l); ++izeta) {
+            const NumericalRadial& radial = radials.chi(l, izeta);
+            if (radial.nr() < 2) {
+                throw std::runtime_error("AtomicRadials.evaluate_orbitals requires r-space radial grids");
+            }
+            const std::size_t radial_index = radial_evals.size();
+            radial_evals.push_back({
+                &radial,
+                std::make_unique<ModuleBase::CubicSpline>(radial.nr(), radial.rgrid(), radial.rvalue()),
+            });
+            for (int m = -l; m <= l; ++m) {
+                orbitals.push_back({
+                    radial_index,
+                    l,
+                    m,
+                });
+            }
+        }
+    }
+    if (static_cast<int>(orbitals.size()) != n_phi) {
+        throw std::runtime_error("AtomicRadials.evaluate_orbitals orbital count does not match nphi");
+    }
+
+    py::array_t<double> out({n_point, static_cast<py::ssize_t>(n_phi)});
+    auto out_buf = out.request();
+    auto* values = static_cast<double*>(out_buf.ptr);
+    std::vector<double> ylm((lmax + 1) * (lmax + 1));
+
+    {
+        py::gil_scoped_release release;
+        for (py::ssize_t ip = 0; ip < n_point; ++ip) {
+            const double x = coords[3 * ip];
+            const double y = coords[3 * ip + 1];
+            const double z = coords[3 * ip + 2];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+                throw std::runtime_error("AtomicRadials.evaluate_orbitals requires finite coordinates");
+            }
+            const double r = std::sqrt(x * x + y * y + z * z);
+            ModuleBase::Vector3<double> vec(x, y, z);
+            ModuleBase::Ylm::get_ylm_real(lmax + 1, vec, ylm.data());
+            for (int iorb = 0; iorb < n_phi; ++iorb) {
+                const OrbitalEval& orbital = orbitals[iorb];
+                const RadialEval& radial_eval = radial_evals[orbital.radial_index];
+                const NumericalRadial& radial = *radial_eval.radial;
+                double radial_value = 0.0;
+                if (r >= radial.rgrid(0) && r <= radial.rmax()) {
+                    radial_eval.spline->eval(1, &r, &radial_value);
+                }
+                values[ip * n_phi + iorb] =
+                    radial_value * ylm[ylm_real_index(orbital.l, orbital.m)];
+            }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+MPI_Comm op2c_default_comm(int mpi_handle = 0) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+#ifdef __MPI
+    int flag = 0;
+    MPI_Initialized(&flag);
+    if (!flag) {
+        MPI_Init(NULL, NULL);
+        std::atexit([](){
+            int finalized = 0;
+            MPI_Finalized(&finalized);
+            if(!finalized) MPI_Finalize();
+        });
+    }
+
+    if (mpi_handle != 0) {
+        comm = MPI_Comm_f2c((MPI_Fint)mpi_handle);
+    }
+#else
+    (void)mpi_handle;
+    comm = 0;
+#endif
+    return comm;
+}
 
 // Type caster for ModuleBase::matrix <-> numpy array
 // We treat ModuleBase::matrix as a row-major dense matrix.
@@ -141,6 +353,14 @@ void bind_numerical_radial(py::module &m) {
             if (self.nk() == 0) return py::array(0, (double*)nullptr);
             return py::array(self.nk(), self.kvalue());
         })
+        .def("rvalue_at", &rvalue_at, py::arg("r_bohr"),
+             "Cubic-spline interpolation of the stored r-space value at one radius.")
+        .def("rvalues_at", &rvalues_at, py::arg("r_bohr"),
+             "Cubic-spline interpolation of stored r-space values at radii.")
+        .def("value_at", &rvalue_at, py::arg("r_bohr"),
+             "Alias for rvalue_at.")
+        .def("values_at", &rvalues_at, py::arg("r_bohr"),
+             "Alias for rvalues_at.")
         .def("__repr__", [](const NumericalRadial& self) {
             return "<NumericalRadial l=" + std::to_string(self.l()) + 
                    " symbol='" + self.symbol() + "'>";
@@ -151,7 +371,7 @@ void bind_atomic_radials(py::module &m) {
     py::class_<AtomicRadials>(m, "AtomicRadials")
         .def(py::init<>())
         .def("build", [](AtomicRadials& self, const std::string& file, int itype, int p, int pm) {
-            self.build(file, itype, p, pm);
+            self.build(file, itype, p, pm, nullptr, op2c_default_comm());
         }, py::arg("file"), py::arg("itype")=0, py::arg("p")=0, py::arg("pm")=0)
         
         // RadialSet properties
@@ -177,7 +397,9 @@ void bind_atomic_radials(py::module &m) {
         })
         .def("__iter__", [](const AtomicRadials& self) {
             return py::make_iterator(self.cbegin(), self.cend());
-        }, py::keep_alive<0, 1>()); 
+        }, py::keep_alive<0, 1>())
+        .def("evaluate_orbitals", &evaluate_atomic_orbitals, py::arg("xyz_bohr"),
+             "Evaluate atomic orbitals at relative Cartesian points in Bohr."); 
 }
 
 void bind_beta_radials(py::module &m) {
@@ -211,7 +433,7 @@ void bind_atom_pseudo(py::module &m) {
         .def(py::init<>())
         .def("init_from_upf", [](Atom_pseudo& self, std::string filename, std::string type, double rcut, bool lspinorb, double soc_lambda) {
              ModuleBase::Logger logger; // Default logger to stdout
-             MPI_Comm comm = MPI_COMM_WORLD; // Serial mode
+             MPI_Comm comm = op2c_default_comm();
              
              // Split filename into directory and file name
              std::filesystem::path p(filename);
@@ -288,7 +510,7 @@ void bind_radial_collection(py::module &m) {
     py::class_<RadialCollection>(m, "RadialCollection")
         .def(py::init<>())
         .def("build_from_files", [](RadialCollection& self, const std::vector<std::string>& files, char ftype, int p, int pm) {
-            self.build(files.size(), files.data(), ftype, p, pm);
+            self.build(files.size(), files.data(), ftype, p, pm, op2c_default_comm());
         }, py::arg("files"), py::arg("ftype")='\0', py::arg("p")=0, py::arg("pm")=0)
         .def("build_from_beta", [](RadialCollection& self, std::vector<BetaRadials>& betas) {
             self.build(betas.size(), betas.data());
@@ -392,25 +614,7 @@ void bind_op2c(py::module &m) {
                          const std::string& orb_dir, const std::vector<std::string> orb_name,
                          const std::string& psd_dir, const std::vector<std::string> psd_name,
                          const std::string& log_file, int mpi_handle) {
-            MPI_Comm comm = MPI_COMM_WORLD;
-#ifdef __MPI
-            int flag = 0;
-            MPI_Initialized(&flag);
-            if (!flag) {
-                MPI_Init(NULL, NULL);
-                std::atexit([](){
-                    int f; MPI_Finalized(&f);
-                    if(!f) MPI_Finalize();
-                });
-            }
-
-            if (mpi_handle != 0) {
-                comm = MPI_Comm_f2c((MPI_Fint)mpi_handle);
-            }
-#else
-            (void)mpi_handle;
-            comm = 0;
-#endif
+            MPI_Comm comm = op2c_default_comm(mpi_handle);
             return new Op2c(ntype, nspin, lspinorb, orb_dir, orb_name, psd_dir, psd_name, comm, log_file);
         }),
         py::arg("ntype"), py::arg("nspin"), py::arg("lspinorb"),
@@ -431,6 +635,21 @@ void bind_op2c(py::module &m) {
         .def_readonly("tcbd", &Op2c::tcbd)
         .def("get_orb_rcut_max", &Op2c::get_orb_rcut_max, py::arg("itype"))
         .def("get_beta_rcut_max", &Op2c::get_beta_rcut_max, py::arg("itype"))
+        .def("beta_nbeta", &Op2c::beta_nbeta, py::arg("itype"),
+             "Number of (l, zeta) projector channels for element ``itype``.")
+        .def("beta_lll", [](Op2c& self, int itype) {
+                auto v = self.beta_lll(itype);
+                return py::array(v.size(), v.data());
+             }, py::arg("itype"),
+             "Per-channel l values for element ``itype`` (length ``beta_nbeta``).")
+        .def("beta_dion", [](Op2c& self, int itype) {
+                auto v = self.beta_dion(itype);
+                int n = self.beta_nbeta(itype);
+                py::array_t<double> arr({n, n});
+                std::memcpy(arr.mutable_data(), v.data(), sizeof(double) * v.size());
+                return arr;
+             }, py::arg("itype"),
+             "Channel-space projector strength matrix D (shape (nbeta, nbeta)).")
 
 
         .def("overlap", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {
@@ -438,12 +657,12 @@ void bind_op2c(py::module &m) {
             int jnorb = self.tcbd.orb_->nphi(jtype);
             std::vector<double> v;
             v.resize(inorb * jnorb);
-            
+
             self.overlap(itype, jtype, Rij, is_transpose, v, nullptr, nullptr, nullptr);
-            
+
             return py::array(v.size(), v.data());
         })
-        
+
         .def("overlap_deriv", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {
             int inorb = self.tcbd.orb_->nphi(itype);
             int jnorb = self.tcbd.orb_->nphi(jtype);
@@ -453,6 +672,34 @@ void bind_op2c(py::module &m) {
             std::vector<double> dvz(inorb * jnorb);
 
             self.overlap(itype, jtype, Rij, is_transpose, v, &dvx, &dvy, &dvz);
+            return py::make_tuple(
+                py::array(v.size(), v.data()),
+                py::array(dvx.size(), dvx.data()),
+                py::array(dvy.size(), dvy.data()),
+                py::array(dvz.size(), dvz.data())
+            );
+        })
+
+        .def("kinetic", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {
+            int inorb = self.tcbd.orb_->nphi(itype);
+            int jnorb = self.tcbd.orb_->nphi(jtype);
+            std::vector<double> v;
+            v.resize(inorb * jnorb);
+
+            self.kinetic(itype, jtype, Rij, is_transpose, v, nullptr, nullptr, nullptr);
+
+            return py::array(v.size(), v.data());
+        })
+
+        .def("kinetic_deriv", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {
+            int inorb = self.tcbd.orb_->nphi(itype);
+            int jnorb = self.tcbd.orb_->nphi(jtype);
+            std::vector<double> v(inorb * jnorb);
+            std::vector<double> dvx(inorb * jnorb);
+            std::vector<double> dvy(inorb * jnorb);
+            std::vector<double> dvz(inorb * jnorb);
+
+            self.kinetic(itype, jtype, Rij, is_transpose, v, &dvx, &dvy, &dvz);
             return py::make_tuple(
                 py::array(v.size(), v.data()),
                 py::array(dvx.size(), dvx.data()),
@@ -504,6 +751,10 @@ void bind_op2c(py::module &m) {
 
 PYBIND11_MODULE(_op2c, m) {
     m.doc() = "Python bindings for Op2c (NAO, Pseudo, and TwoCenter Integrals)";
+    m.def("real_spherical_harmonics", &real_spherical_harmonics, py::arg("lmax"), py::arg("xyz"),
+          "Real spherical harmonics in ModuleBase::Ylm order: m=0,+1,-1,+2,-2 within each l.");
+    m.def("ylm_real_index", &ylm_real_index, py::arg("l"), py::arg("m"),
+          "Index of one (l, m) value in real_spherical_harmonics output.");
     
     bind_numerical_radial(m);
     bind_atomic_radials(m);
@@ -514,4 +765,3 @@ PYBIND11_MODULE(_op2c, m) {
     bind_two_center_bundle(m);
     bind_op2c(m);
 }
-

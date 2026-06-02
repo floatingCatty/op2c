@@ -59,6 +59,13 @@ class AtomicRadials : public RadialSet
                          MPI_Comm comm = MPI_COMM_WORLD   //!< MPI comm
     );
 
+    //! Read the rescumat *_AtomicData.mat format
+    void read_rescumat_mat(const std::string& file,
+                           const int p = 0,
+                           const int pm = 0,
+                           const ModuleBase::Logger* ptr_logger = nullptr,
+                           MPI_Comm comm = MPI_COMM_WORLD);
+
 };
 
 #endif

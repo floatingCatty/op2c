@@ -56,10 +56,10 @@ void Ylm::get_ylm_real( const int &Lmax, const ModuleBase::Vector3<double> &vec,
 	//1e-9 is too large
 	const double cut0 = 1e-12;
 	// allocate space.
-	Ylm::nlm = Lmax * Lmax;
+	const int nlm = Lmax * Lmax;
 	if(Lmax==1)
 	{
-		for(int i=0; i<Ylm::nlm; i++)
+		for(int i=0; i<nlm; i++)
 		{
 			ylmr[i] = ModuleBase::SQRT_INVERSE_FOUR_PI;
 		}
@@ -172,10 +172,10 @@ void Ylm::get_ylm_real( const int &Lmax, const ModuleBase::Vector3<double> &vec,
 	//1e-9 is too large
 	const double cut0 = 1e-12;
 	// allocate space.
-	Ylm::nlm = Lmax * Lmax;
+	const int nlm = Lmax * Lmax;
 	if(Lmax==1)
 	{
-		for(int i=0; i<Ylm::nlm; i++)
+		for(int i=0; i<nlm; i++)
 		{
 			ylmr[i] = ModuleBase::SQRT_INVERSE_FOUR_PI;
 			for(int j = 0; j < 3; j++)

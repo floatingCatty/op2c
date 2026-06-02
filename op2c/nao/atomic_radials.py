@@ -1,5 +1,6 @@
 from __future__ import annotations
 import _op2c
+import numpy as np
 from .numerical_radial import NumericalRadial
 from typing import Union, List, Iterator, Optional
 
@@ -47,6 +48,10 @@ class AtomicRadials:
         return self._handle.rcut_max
 
     @property
+    def nphi(self) -> int:
+        return self._handle.nphi
+
+    @property
     def orb_ecut(self) -> float:
         """Energy cutoff suggested by the orbital file."""
         return self._handle.orb_ecut()
@@ -56,6 +61,11 @@ class AtomicRadials:
 
     def norb(self, l: int) -> int:
         return self._handle.norb(l)
+
+    def evaluate_orbitals(self, xyz_bohr: np.ndarray) -> np.ndarray:
+        """Evaluate orbitals at relative Cartesian points in Bohr."""
+        xyz = np.ascontiguousarray(xyz_bohr, dtype=np.float64)
+        return self._handle.evaluate_orbitals(xyz)
 
     def __len__(self) -> int:
         return len(self._handle)
