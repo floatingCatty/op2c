@@ -47,6 +47,9 @@ class pseudo
 
     // Local pseudopotentials
     std::vector<double> vloc_at = {}; // [mesh], local potential( = pseudopot_upf.vloc )
+    std::vector<double> vloc_r = {}; // optional native local-potential radial grid
+    std::vector<double> vloc_rab = {}; // optional native local-potential integration weights
+    std::vector<double> vloc_at_radial = {}; // optional native local potential values
 
     // <PP_MESH>
     std::vector<double> r = {};   // radial logaritmic mesh, r[0:mesh-1]
@@ -57,6 +60,11 @@ class pseudo
 
     //<PP_RHOATOM>
     std::vector<double> rho_at = {}; // radial atomic charge density, rho_at[0:mesh-1]
+    double short_range_radius = 0.0; // rescumat data.Rna outer radius
+    double short_range_charge = 0.0; // integral of rescumat data.Rna.rhoData
+    std::vector<double> short_range_q_grid = {}; // rescumat short-range q grid
+    std::vector<double> short_range_q_weights = {}; // rescumat short-range q weights
+    std::vector<double> short_range_fq = {}; // Fourier transform of data.Rna.rhoData on short_range_q_grid
 
     // <PP_PSWFC>
     ModuleBase::matrix chi; // radial atomic orbitals, chi(nchi, mesh)

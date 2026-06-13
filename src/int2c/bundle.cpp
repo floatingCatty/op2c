@@ -7,7 +7,7 @@
 #include "nao/atomic_radials.h"
 #include <memory>
 
-void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const std::string& orbital_dir, MPI_Comm comm)
+void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const std::string& orbital_dir, bool pm_build, MPI_Comm comm)
 {
     std::vector<std::string> file_orb(ntype);
     int rank = 0;
@@ -25,25 +25,35 @@ void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const s
 #endif
     
     orb_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    orbp_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    orbm_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    if (pm_build) {
+        orbp_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+        orbm_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    }
 
     orb_->build(ntype, file_orb.data(), '\0', 0, 0, comm); // automatically detect file type
-    orbp_->build(ntype, file_orb.data(), '\0', -1, 1, comm);
-    orbm_->build(ntype, file_orb.data(), '\0', -1, -1, comm);
+
+
+    if (pm_build) {
+        orbp_->build(ntype, file_orb.data(), '\0', -1, 1, comm);
+        orbm_->build(ntype, file_orb.data(), '\0', -1, -1, comm);
+    }
 
     // std::cout << "rank: " << rank << " 2CBuddle build_orb done" << std::endl;
 }
 
-void TwoCenterBundle::build_orb(int ntype, AtomicRadials* radials)
+void TwoCenterBundle::build_orb(int ntype, AtomicRadials* radials, bool pm_build)
 {
     orb_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    orbp_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    orbm_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    if (pm_build) {
+        orbp_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+        orbm_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+    }
 
     orb_->build(ntype, radials);
-    orbp_->build(orb_.get(), -1, 1);
-    orbm_->build(orb_.get(), -1, -1);
+    if (pm_build) {
+        orbp_->build(orb_.get(), -1, 1);
+        orbm_->build(orb_.get(), -1, -1);
+    }
 }
 
 void TwoCenterBundle::tabulate()
@@ -67,40 +77,47 @@ void TwoCenterBundle::tabulate()
     // set up a universal radial grid
     double rmax = orb_->rcut_max();
     if (beta_) { rmax = std::max(rmax, beta_->rcut_max()); }
-    double dr = 0.01;
-    double cutoff = 2.0 * rmax;
-    int nr = static_cast<int>(rmax / dr) + 1;
+    const double table_dr = 0.01;
+    const double table_cutoff = 2.0 * rmax;
+    const int table_nr = static_cast<int>(table_cutoff / table_dr) + 1;
 
-    orb_->set_uniform_grid(true, nr, cutoff, 'i', true);
+    orb_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true);
     if (beta_) { 
-        beta_->set_uniform_grid(true, nr, cutoff, 'i', true); 
+        beta_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true); 
         if (betap_) {
-            betap_->set_uniform_grid(true, nr, cutoff, 'i', true);
-            betam_->set_uniform_grid(true, nr, cutoff, 'i', true);
+            betap_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true);
+            betam_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true);
         }
     }
-    if (orbp_) { orbp_->set_uniform_grid(true, nr, cutoff, 'i', true); }
-    if (orbm_) { orbm_->set_uniform_grid(true, nr, cutoff, 'i', true); }
+    if (orbp_) { orbp_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true); }
+    if (orbm_) { orbm_->set_uniform_grid(true, table_nr, table_cutoff, 'i', true); }
 
     // build TwoCenterIntegrator objects
     // 'T' tag selects the kinetic integral (op_pk = -2 in table.cpp), matching
     // the documented Operator type codes in integrator.h ('S' overlap,
     // 'T' kinetic, 'R' position).
     kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
-    kinetic_orb->tabulate(*orb_, *orb_, 'T', nr, cutoff);
+    kinetic_orb->tabulate(*orb_, *orb_, 'T', table_nr, table_cutoff);
     ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
 
     overlap_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
-    overlap_orb->tabulate(*orb_, *orbp_, *orbm_, nr, cutoff);
+    if (orbp_) {
+        // position-augmented overlap (S + <r>), needs the l+/-1 branch
+        overlap_orb->tabulate(*orb_, *orbp_, *orbm_, table_nr, table_cutoff);
+    } else {
+        // values-only overlap S (pm_build=false): identical S values, no <r> op
+        overlap_orb->tabulate(*orb_, *orb_, 'S', table_nr, table_cutoff);
+    }
     ModuleBase::Memory::record("TwoCenterTable: Overlap & Position Op", overlap_orb->table_memory());
 
     if (beta_)
     {
         overlap_orb_beta = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
         if (betap_) {
-            overlap_orb_beta->tabulate(*orb_, *beta_, *betap_, *betam_, nr, cutoff);
+            overlap_orb_beta->tabulate(
+                *orb_, *beta_, *betap_, *betam_, table_nr, table_cutoff);
         } else {
-            overlap_orb_beta->tabulate(*orb_, *beta_, 'S', nr, cutoff);
+            overlap_orb_beta->tabulate(*orb_, *beta_, 'S', table_nr, table_cutoff);
         }
         ModuleBase::Memory::record("TwoCenterTable: Nonlocal", overlap_orb_beta->table_memory());
     }
@@ -197,17 +214,19 @@ void TwoCenterBundle::tabulate(const double lcao_ecut,
 //     betam_->build(beta_.get(), beta_->p() - 1, -1);
 // }
 
-void TwoCenterBundle::build_beta(int ntype, BetaRadials* nl)
+void TwoCenterBundle::build_beta(int ntype, BetaRadials* nl, bool pm_build)
 {
     beta_ = std::unique_ptr<RadialCollection>(new RadialCollection);
     beta_->build(ntype, nl);
     
-    betap_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    betam_ = std::unique_ptr<RadialCollection>(new RadialCollection);
-    // p = beta_->p() - 1, pm = 1
-    betap_->build(beta_.get(), beta_->p() - 1, 1);
-    // p = beta_->p() - 1, pm = -1
-    betam_->build(beta_.get(), beta_->p() - 1, -1);
+    if (pm_build) {
+        betap_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+        betam_ = std::unique_ptr<RadialCollection>(new RadialCollection);
+        // p = beta_->p() - 1, pm = 1
+        betap_->build(beta_.get(), beta_->p() - 1, 1);
+        // p = beta_->p() - 1, pm = -1
+        betam_->build(beta_.get(), beta_->p() - 1, -1);
+    }
 }
 
 // void TwoCenterBundle::to_LCAO_Orbitals(LCAO_Orbitals& ORB,

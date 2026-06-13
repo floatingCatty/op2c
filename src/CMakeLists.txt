@@ -68,6 +68,7 @@ add_library(nao_core
     io/rescumat_mat.cpp
     nao/radial_function.cpp
     nao/orbital_shell.cpp
+    nao/orbital_evaluator.cpp
     nao/atomic_basis.cpp
     nao/atomic_radials.cpp # Check if needed or legacy
 )

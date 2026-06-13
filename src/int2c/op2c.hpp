@@ -76,7 +76,8 @@ public:
     Op2c(
         size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
-        MPI_Comm comm, const std::string& log_file
+        MPI_Comm comm, const std::string& log_file,
+        bool pm_build = true
     );
 
     /*!
@@ -90,7 +91,8 @@ public:
     Op2c(
         std::vector<AtomicRadials> orbitals,
         std::vector<Atom_pseudo> pseudos,
-        int nspin, bool lspinorb
+        int nspin, bool lspinorb,
+        bool pm_build = true
     );
 
     ~Op2c() = default;
@@ -126,6 +128,72 @@ public:
      * @param[out] dvz (Optional) z-component of the gradient dT/dR.
      */
     void kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx = nullptr, std::vector<double>* dvy = nullptr, std::vector<double>* dvz = nullptr);
+
+    /*!
+     * @brief Batched, OpenMP-threaded two-center build over a whole pair list.
+     *
+     * Evaluates overlap (kind=0) or kinetic (kind=1) for @p npair atom pairs,
+     * parallelizing the per-pair op2c evaluation with OpenMP. Each pair's
+     * RowMajor inorb*jnorb block values are concatenated into @p flat_out;
+     * @p offsets_out[p]..offsets_out[p+1] slices pair p. No 0.5 is applied to
+     * the kinetic result (this mirrors kinetic(); callers convert to Hartree).
+     *
+     * This is the C++ home of the batch routine; the pybind layer is only a thin
+     * numpy<->vector marshalling wrapper around it (it releases the GIL).
+     *
+     * @param kind 0 = overlap S_ij, 1 = kinetic T_ij.
+     * @param itypes npair element types of the row (bra) atom.
+     * @param jtypes npair element types of the col (ket) atom.
+     * @param rij    npair*3 displacements R_col - R_row (row-major, Bohr).
+     * @param npair  number of pairs.
+     * @param[out] flat_out    concatenated block values (resized inside).
+     * @param[out] offsets_out npair+1 prefix offsets into flat_out (resized inside).
+     */
+    void two_center_batch(int kind,
+                          const int* itypes, const int* jtypes, const double* rij,
+                          size_t npair,
+                          std::vector<double>& flat_out,
+                          std::vector<long>& offsets_out);
+
+    /*!
+     * @brief Batched, OpenMP-threaded non-local (V_nl) build over projector atoms.
+     *
+     * Assembles the 3-center sum V_nl,ij(R) = sum_K <phi_i|beta_K> D_K
+     * <beta_K|phi_j>, accumulated over every projector atom K, parallelizing the
+     * per-K work (one orb_r_beta batch + the neighbour (i,j) products) over K.
+     * Different K contribute to the same (i,j,R) block, so accumulation uses
+     * thread-local maps merged after the parallel region. The per-type m-expanded
+     * D matrix is supplied by the caller (it depends only on the element type and
+     * is cheap to build once). This is the C++ home of the V_nl loop; the pybind
+     * layer is a thin numpy<->vector wrapper.
+     *
+     * Neighbour structure (CSR over the n_K owned projector atoms):
+     * @param k_types     op2c type of each projector atom K (size n_K).
+     * @param n_K         number of projector atoms.
+     * @param neigh_off   CSR offsets, size n_K+1.
+     * @param neigh_gidx  global atom index of each neighbour orbital atom i.
+     * @param neigh_type  op2c type of each neighbour i.
+     * @param neigh_shift 3 ints per neighbour: lattice shift of i relative to K.
+     * @param neigh_disp  3 doubles per neighbour: displacement r_i - r_K (Bohr).
+     * Per-type m-expanded D (only types with beta projectors are used):
+     * @param n_types     number of element types.
+     * @param dm_dim      n_phi_beta (D dimension) per type, size n_types.
+     * @param dm_flat     concatenated dm_dim[t]^2 row-major D matrices.
+     * Outputs (one entry per unique non-zero (i,j,R) block, accumulated):
+     * @param[out] out_i, out_j   global block indices.
+     * @param[out] out_shift      3 ints per block (R_j - R_i).
+     * @param[out] out_flat       concatenated RowMajor n_orb_i*n_orb_j values.
+     * @param[out] out_off        prefix offsets into out_flat, size n_out+1.
+     */
+    void vnl_batch(const int* k_types, size_t n_K,
+                   const long* neigh_off,
+                   const int* neigh_gidx, const int* neigh_type,
+                   const int* neigh_shift, const double* neigh_disp,
+                   int n_types, const int* dm_dim, const double* dm_flat,
+                   std::vector<int>& out_i, std::vector<int>& out_j,
+                   std::vector<int>& out_shift,
+                   std::vector<double>& out_flat,
+                   std::vector<long>& out_off);
 
     /*!
      * @brief Computes overlap and position operator integrals simultaneously.
@@ -165,12 +233,17 @@ public:
      * @param[out] oyb y-derivative.
      * @param[out] ozb z-derivative.
      */
+    // with_grad=true computes ob = <phi|beta> plus the position blocks
+    // oxb/oyb/ozb = <phi|r|beta> (needs the position-augmented beta tables, i.e.
+    // pm_build=true). with_grad=false computes ONLY ob (values), via the plain
+    // overlap path — valid with pm_build=false and all V_nl needs.
     void orb_r_beta(
-        std::vector<size_t>& itype, size_t ktype, 
+        std::vector<size_t>& itype, size_t ktype,
         std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
         bool is_transpose,
-        std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb, 
-        std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb
+        std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb,
+        std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb,
+        bool with_grad = true
     );
 
     /*!
@@ -202,6 +275,138 @@ public:
 
     double get_orb_rcut_max(int itype) const;
     double get_beta_rcut_max(int itype) const;
+
+    /*!
+     * @brief Valence charge for element ``itype`` from the loaded pseudopotential.
+     *
+     * Returns ``Atom_pseudo::zv``. rescu++ uses this value as the ionic charge
+     * in pseudopotential ion-ion Ewald sums.
+     */
+    double valence_charge(int itype) const;
+
+    /*!
+     * @brief Radial grid for the local pseudopotential of element ``itype``.
+     *
+     * Returns the ``Atom_pseudo::r`` vector in Bohr. Requires a pseudopotential
+     * to be loaded for every element type.
+     */
+    std::vector<double> vloc_rgrid(int itype) const;
+
+    /*!
+     * @brief Radial integration weights for ``vloc_rgrid``.
+     *
+     * Returns ``Atom_pseudo::rab`` in Bohr. The weights are paired with the
+     * local-potential radial grid and are used by Simpson-style radial
+     * Fourier transforms.
+     */
+    std::vector<double> vloc_rab(int itype) const;
+
+    /*!
+     * @brief Number of local-potential radial points active for integration.
+     *
+     * Returns ``Atom_pseudo::msh`` when set, otherwise the full mesh size.
+     */
+    int vloc_msh(int itype) const;
+
+    /*!
+     * @brief Local pseudopotential values for element ``itype`` on ``vloc_rgrid``.
+     *
+     * Returns ``Atom_pseudo::vloc_at`` in the op2c pseudopotential convention
+     * (Rydberg). For rescumat MAT files this slot contains ``data.Vna``;
+     * Python wrappers that combine it with rescu++ Hartree-valued grids divide
+     * by two.
+     */
+    std::vector<double> vloc_at(int itype) const;
+
+    /*!
+     * @brief Radial grid for the neutral atomic density of element ``itype``.
+     *
+     * Returns the ``Atom_pseudo::r`` vector in Bohr. The companion values are
+     * returned by ``atomic_density_at``.
+     */
+    std::vector<double> atomic_density_rgrid(int itype) const;
+
+    /*!
+     * @brief Radial integration weights for ``atomic_density_rgrid``.
+     *
+     * Returns ``Atom_pseudo::rab`` in Bohr. These weights are paired with the
+     * neutral atomic density mesh and are used by radial Fourier transforms.
+     */
+    std::vector<double> atomic_density_rab(int itype) const;
+
+    /*!
+     * @brief Neutral atomic density values for element ``itype``.
+     *
+     * Returns ``Atom_pseudo::rho_at`` on ``atomic_density_rgrid``. UPF files
+     * fill this from ``PP_RHOATOM``; rescumat MAT files fill this from
+     * ``data.Rna.rhoData``.
+     */
+    std::vector<double> atomic_density_at(int itype) const;
+
+    /*!
+     * @brief Rescumat short-range neutral-density radius for element ``itype``.
+     *
+     * Returns the final value in ``data.Rna.rrData`` from rescumat MAT pseudo
+     * input. This radius is used as the overlap support in
+     * ``runtime/energy.py::short_range_ion_energy``.
+     */
+    double short_range_radius(int itype) const;
+
+    /*!
+     * @brief Rescumat short-range neutral charge for element ``itype``.
+     *
+     * Returns ``4*pi*trapz(r^2*rho, r)`` from ``data.Rna.rrData`` and
+     * ``data.Rna.rhoData``.
+     */
+    double short_range_charge(int itype) const;
+
+    /*!
+     * @brief Rescumat short-range q grid for element ``itype``.
+     *
+     * Returns ``OrbitalSet(1).qqData`` from rescumat MAT pseudo input.
+     */
+    std::vector<double> short_range_q_grid(int itype) const;
+
+    /*!
+     * @brief Rescumat short-range q weights for element ``itype``.
+     *
+     * Returns ``OrbitalSet(1).qwData`` from rescumat MAT pseudo input.
+     */
+    std::vector<double> short_range_q_weights(int itype) const;
+
+    /*!
+     * @brief Fourier transform of rescumat ``data.Rna.rhoData``.
+     *
+     * Values are evaluated on ``short_range_q_grid(itype)`` with
+     * ``data.Rna.drData`` weights and the same l=0 transform used by
+     * ``runtime/energy.py::_radial_ft_l0``.
+     */
+    std::vector<double> short_range_fq(int itype) const;
+
+    /*!
+     * @brief Whether element ``itype`` carries a partial core (NLCC) charge.
+     *
+     * Returns ``Atom_pseudo::nlcc``. rescumat MAT files set this true when
+     * ``data.Rpc`` is populated (e.g. P) and false otherwise (e.g. Si, Al).
+     */
+    bool has_partial_core(int itype) const;
+
+    /*!
+     * @brief Radial grid for the partial core density of element ``itype``.
+     *
+     * Returns the ``Atom_pseudo::r`` vector in Bohr. The companion values are
+     * returned by ``partial_core_at``.
+     */
+    std::vector<double> partial_core_rgrid(int itype) const;
+
+    /*!
+     * @brief Partial core (NLCC) charge density values for element ``itype``.
+     *
+     * Returns ``Atom_pseudo::rho_atc`` (a volume density rho_core(r)) on
+     * ``partial_core_rgrid``. rescumat MAT files fill this from
+     * ``data.Rpc.rhoData``; it is all zero for elements without NLCC.
+     */
+    std::vector<double> partial_core_at(int itype) const;
 
     /*!
      * @brief Number of distinct (l, zeta) projector channels for element ``itype``.

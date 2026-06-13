@@ -118,6 +118,9 @@ class AtomPseudo:
     
     @property
     def rho_atc(self) -> np.ndarray: return self._handle.rho_atc
+
+    @property
+    def rho_at(self) -> np.ndarray: return self._handle.rho_at
     
     @property
     def lll(self) -> np.ndarray: return self._handle.lll

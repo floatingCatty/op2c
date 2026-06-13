@@ -20,7 +20,9 @@ struct RadialData
     bool is_ghost = false;
     std::vector<double> r_grid;
     std::vector<double> r_values;
+    std::vector<double> r_weights;
     std::vector<double> q_grid;
+    std::vector<double> q_weights;
 };
 
 struct AtomicData
@@ -30,6 +32,12 @@ struct AtomicData
     double valence_electrons = 0.0;
     std::vector<RadialData> orbitals;
     std::vector<RadialData> projectors;
+    RadialData local_potential;
+    bool has_local_potential = false;
+    RadialData atomic_density;
+    bool has_atomic_density = false;
+    RadialData partial_core;
+    bool has_partial_core = false;
 };
 
 bool has_mat_suffix(const std::string& file);

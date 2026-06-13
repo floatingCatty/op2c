@@ -277,6 +277,25 @@ void Atom_pseudo::setup_nonlocal(const ModuleBase::Logger& logger, const bool ls
 }
 #ifdef __MPI
 
+namespace
+{
+void bcast_double_vector(std::vector<double>& values, MPI_Comm comm)
+{
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+    int size = static_cast<int>(values.size());
+    Parallel_Common::bcast_int(size, comm);
+    if (rank != 0)
+    {
+        values.assign(static_cast<std::size_t>(size), 0.0);
+    }
+    if (size > 0)
+    {
+        Parallel_Common::bcast_double(values.data(), size, comm);
+    }
+}
+} // namespace
+
 void Atom_pseudo::bcast_atom_pseudo(MPI_Comm comm)
 {
     // ModuleBase::TITLE("Atom_pseudo", "bcast_atom_pseudo");
@@ -341,6 +360,11 @@ void Atom_pseudo::bcast_atom_pseudo(MPI_Comm comm)
     Parallel_Common::bcast_double(rab.data(), mesh, comm);
     Parallel_Common::bcast_double(rho_atc.data(), mesh, comm);
     Parallel_Common::bcast_double(rho_at.data(), mesh, comm);
+    Parallel_Common::bcast_double(short_range_radius, comm);
+    Parallel_Common::bcast_double(short_range_charge, comm);
+    bcast_double_vector(short_range_q_grid, comm);
+    bcast_double_vector(short_range_q_weights, comm);
+    bcast_double_vector(short_range_fq, comm);
     Parallel_Common::bcast_double(chi.c, nchi * mesh, comm);
     // == end of pseudo_atom ==
 

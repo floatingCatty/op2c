@@ -1,5 +1,6 @@
 #include "io/rescumat_mat.h"
 
+#include "math/interpolation/cubic_spline.h"
 #include "pseudopotential/pseudo_atom.h"
 
 #include <matio.h>
@@ -235,14 +236,32 @@ RescumatMat::RadialData read_radial_entry(const matvar_t* entries,
         != 0;
     output.r_grid = numeric_vector(struct_field(entries, "rrData", index, owner), owner + ".rrData");
     output.r_values = numeric_vector(struct_field(entries, values_field, index, owner), owner + "." + values_field);
+    matvar_t* r_weights = optional_struct_field(entries, "drData", index);
+    if (r_weights != nullptr)
+    {
+        output.r_weights = numeric_vector(r_weights, owner + ".drData");
+    }
     matvar_t* q_grid = optional_struct_field(entries, "qqData", index);
     if (q_grid != nullptr)
     {
         output.q_grid = numeric_vector(q_grid, owner + ".qqData");
     }
+    matvar_t* q_weights = optional_struct_field(entries, "qwData", index);
+    if (q_weights != nullptr)
+    {
+        output.q_weights = numeric_vector(q_weights, owner + ".qwData");
+    }
     if (output.r_grid.size() != output.r_values.size())
     {
         throw std::runtime_error(owner + " rrData and radial values have different lengths");
+    }
+    if (!output.r_weights.empty() && output.r_grid.size() != output.r_weights.size())
+    {
+        throw std::runtime_error(owner + " rrData and drData have different lengths");
+    }
+    if (!output.q_weights.empty() && output.q_grid.size() != output.q_weights.size())
+    {
+        throw std::runtime_error(owner + " qqData and qwData have different lengths");
     }
     if (output.r_grid.size() < 2)
     {
@@ -298,41 +317,47 @@ std::vector<double> make_common_grid(const std::vector<RescumatMat::RadialData>&
     return grid;
 }
 
-std::vector<double> interpolate_linear(const std::vector<double>& source_grid,
-                                       const std::vector<double>& source_values,
-                                       const std::vector<double>& target_grid)
+std::vector<double> interpolate_spline_zero(const std::vector<double>& source_grid,
+                                            const std::vector<double>& source_values,
+                                            const std::vector<double>& target_grid)
 {
     std::vector<double> output(target_grid.size(), 0.0);
-    size_t source_index = 0;
+    std::vector<double> eval_grid;
+    std::vector<size_t> eval_indices;
+    eval_grid.reserve(target_grid.size());
+    eval_indices.reserve(target_grid.size());
+
+    const double r_min = source_grid.front();
+    const double r_max = source_grid.back();
     for (size_t target_index = 0; target_index < target_grid.size(); ++target_index)
     {
         const double r = target_grid[target_index];
-        if (r < source_grid.front() || r > source_grid.back())
+        if (r < r_min || r > r_max)
         {
             continue;
         }
-        while (source_index + 1 < source_grid.size() && source_grid[source_index + 1] < r)
-        {
-            ++source_index;
-        }
-        if (source_index + 1 >= source_grid.size())
-        {
-            output[target_index] = source_values.back();
-            continue;
-        }
-        const double x0 = source_grid[source_index];
-        const double x1 = source_grid[source_index + 1];
-        const double y0 = source_values[source_index];
-        const double y1 = source_values[source_index + 1];
-        if (x1 == x0)
-        {
-            output[target_index] = y0;
-        }
-        else
-        {
-            const double t = (r - x0) / (x1 - x0);
-            output[target_index] = y0 + t * (y1 - y0);
-        }
+        eval_indices.push_back(target_index);
+        eval_grid.push_back(r);
+    }
+    if (eval_grid.empty())
+    {
+        return output;
+    }
+
+    ModuleBase::CubicSpline spline(
+        static_cast<int>(source_grid.size()),
+        source_grid.data(),
+        source_values.data()
+    );
+    std::vector<double> eval_values(eval_grid.size(), 0.0);
+    spline.eval(
+        static_cast<int>(eval_grid.size()),
+        eval_grid.data(),
+        eval_values.data()
+    );
+    for (size_t index = 0; index < eval_indices.size(); ++index)
+    {
+        output[eval_indices[index]] = eval_values[index];
     }
     return output;
 }
@@ -350,6 +375,65 @@ std::vector<double> radial_steps(const std::vector<double>& grid)
         steps[index] = grid[index] - grid[index - 1];
     }
     return steps;
+}
+
+double spherical_j0(const double x)
+{
+    return std::abs(x) < 1.0e-12 ? 1.0 : std::sin(x) / x;
+}
+
+std::vector<double> radial_ft_l0(
+    const std::vector<double>& r_grid,
+    const std::vector<double>& rho,
+    const std::vector<double>& r_weights,
+    const std::vector<double>& q_grid
+)
+{
+    constexpr double four_pi = 12.56637061435917295385;
+    constexpr double sqrt_two_over_pi = 0.79788456080286535588;
+    if (r_grid.size() != rho.size() || r_grid.size() != r_weights.size())
+    {
+        throw std::runtime_error("data.Rna radial arrays have inconsistent lengths");
+    }
+    std::vector<double> fq(q_grid.size(), 0.0);
+    for (std::size_t iq = 0; iq < q_grid.size(); ++iq)
+    {
+        const double q = q_grid[iq];
+        double accum = 0.0;
+        for (std::size_t ir = 0; ir < r_grid.size(); ++ir)
+        {
+            const double r = r_grid[ir];
+            accum += four_pi * rho[ir] * r * r * spherical_j0(q * r) * r_weights[ir];
+        }
+        fq[iq] = sqrt_two_over_pi * accum;
+    }
+    return fq;
+}
+
+double radial_charge(
+    const std::vector<double>& r_grid,
+    const std::vector<double>& rho
+)
+{
+    constexpr double four_pi = 12.56637061435917295385;
+    if (r_grid.size() != rho.size())
+    {
+        throw std::runtime_error("data.Rna charge arrays have inconsistent lengths");
+    }
+    if (r_grid.size() < 2)
+    {
+        return 0.0;
+    }
+    double accum = 0.0;
+    for (std::size_t index = 1; index < r_grid.size(); ++index)
+    {
+        const double r_left = r_grid[index - 1];
+        const double r_right = r_grid[index];
+        const double y_left = r_left * r_left * rho[index - 1];
+        const double y_right = r_right * r_right * rho[index];
+        accum += 0.5 * (y_left + y_right) * (r_right - r_left);
+    }
+    return four_pi * accum;
 }
 
 int maximum_l(const std::vector<RescumatMat::RadialData>& radials)
@@ -399,6 +483,81 @@ AtomicData read_atomic_data(const std::string& file)
     output.valence_electrons = numeric_scalar(struct_field(atom, "N", 0, "data.atom"), "data.atom.N");
     output.orbitals = read_radial_array(struct_field(data.get(), "OrbitalSet", 0, "data"), "data.OrbitalSet", "frData");
 
+    matvar_t* neutral_potential = optional_struct_field(data.get(), "Vna", 0);
+    if (neutral_potential != nullptr && element_count(neutral_potential) > 0)
+    {
+        output.local_potential.r_grid =
+            numeric_vector(struct_field(neutral_potential, "rrData", 0, "data.Vna"), "data.Vna.rrData");
+        output.local_potential.r_values =
+            numeric_vector(struct_field(neutral_potential, "vvData", 0, "data.Vna"), "data.Vna.vvData");
+        output.local_potential.r_weights =
+            numeric_vector(struct_field(neutral_potential, "drData", 0, "data.Vna"), "data.Vna.drData");
+        if (output.local_potential.r_grid.size() != output.local_potential.r_values.size())
+        {
+            throw std::runtime_error("data.Vna rrData and vvData have different lengths");
+        }
+        if (output.local_potential.r_grid.size() != output.local_potential.r_weights.size())
+        {
+            throw std::runtime_error("data.Vna rrData and drData have different lengths");
+        }
+        if (output.local_potential.r_grid.size() < 2)
+        {
+            throw std::runtime_error("data.Vna must contain at least two radial grid points");
+        }
+        output.has_local_potential = true;
+    }
+
+    matvar_t* atomic_density = optional_struct_field(data.get(), "Rna", 0);
+    if (atomic_density != nullptr && element_count(atomic_density) > 0)
+    {
+        output.atomic_density.r_grid =
+            numeric_vector(struct_field(atomic_density, "rrData", 0, "data.Rna"), "data.Rna.rrData");
+        output.atomic_density.r_values =
+            numeric_vector(struct_field(atomic_density, "rhoData", 0, "data.Rna"), "data.Rna.rhoData");
+        matvar_t* rna_weights = optional_struct_field(atomic_density, "drData", 0);
+        if (rna_weights != nullptr)
+        {
+            output.atomic_density.r_weights = numeric_vector(rna_weights, "data.Rna.drData");
+        }
+        if (output.atomic_density.r_grid.size() != output.atomic_density.r_values.size())
+        {
+            throw std::runtime_error("data.Rna rrData and rhoData have different lengths");
+        }
+        if (!output.atomic_density.r_weights.empty()
+            && output.atomic_density.r_grid.size() != output.atomic_density.r_weights.size())
+        {
+            throw std::runtime_error("data.Rna rrData and drData have different lengths");
+        }
+        if (output.atomic_density.r_grid.size() < 2)
+        {
+            throw std::runtime_error("data.Rna must contain at least two radial grid points");
+        }
+        output.has_atomic_density = true;
+    }
+
+    // data.Rpc holds the partial core (nonlinear core correction) charge
+    // density as a volume density rho_core(r). It is empty for elements
+    // without NLCC (e.g. Si, Al); populated (rrData/rhoData) for e.g. P.
+    matvar_t* partial_core = optional_struct_field(data.get(), "Rpc", 0);
+    if (partial_core != nullptr && element_count(partial_core) > 0)
+    {
+        matvar_t* rr = optional_struct_field(partial_core, "rrData", 0);
+        matvar_t* rho = optional_struct_field(partial_core, "rhoData", 0);
+        if (rr != nullptr && rho != nullptr && element_count(rr) > 0 && element_count(rho) > 0)
+        {
+            output.partial_core.r_grid = numeric_vector(rr, "data.Rpc.rrData");
+            output.partial_core.r_values = numeric_vector(rho, "data.Rpc.rhoData");
+            if (output.partial_core.r_grid.size() != output.partial_core.r_values.size())
+            {
+                throw std::runtime_error("data.Rpc rrData and rhoData have different lengths");
+            }
+            if (output.partial_core.r_grid.size() >= 2)
+            {
+                output.has_partial_core = true;
+            }
+        }
+    }
+
     matvar_t* projectors = optional_struct_field(data.get(), "Vnl", 0);
     if (projectors != nullptr && element_count(projectors) > 0)
     {
@@ -422,9 +581,20 @@ double infer_energy_cutoff_ry(const std::vector<RadialData>& orbitals)
 
 void fill_atom_pseudo_from_atomic_data(const AtomicData& data, Atom_pseudo& pseudo, double rcut)
 {
-    const std::vector<double> grid = data.projectors.empty()
-        ? make_common_grid(data.orbitals)
-        : make_common_grid(data.projectors);
+    std::vector<RadialData> pseudo_radials = data.projectors.empty() ? data.orbitals : data.projectors;
+    if (data.has_local_potential)
+    {
+        pseudo_radials.push_back(data.local_potential);
+    }
+    if (data.has_atomic_density)
+    {
+        pseudo_radials.push_back(data.atomic_density);
+    }
+    if (data.has_partial_core)
+    {
+        pseudo_radials.push_back(data.partial_core);
+    }
+    const std::vector<double> grid = make_common_grid(pseudo_radials);
     const int mesh = static_cast<int>(grid.size());
 
     pseudo.has_so = false;
@@ -432,7 +602,7 @@ void fill_atom_pseudo_from_atomic_data(const AtomicData& data, Atom_pseudo& pseu
     pseudo.psd = data.symbol;
     pseudo.pp_type = "NC";
     pseudo.tvanp = false;
-    pseudo.nlcc = false;
+    pseudo.nlcc = data.has_partial_core;
     pseudo.xc_func = "";
     pseudo.zv = data.valence_electrons;
     pseudo.etotps = 0.0;
@@ -466,7 +636,73 @@ void fill_atom_pseudo_from_atomic_data(const AtomicData& data, Atom_pseudo& pseu
     pseudo.rab = radial_steps(grid);
     pseudo.rho_atc.assign(mesh, 0.0);
     pseudo.rho_at.assign(mesh, 0.0);
+    if (data.has_atomic_density)
+    {
+        const auto values = interpolate_spline_zero(
+            data.atomic_density.r_grid,
+            data.atomic_density.r_values,
+            grid
+        );
+        for (int ir = 0; ir < mesh; ++ir)
+        {
+            pseudo.rho_at[ir] = values[ir];
+        }
+        if (!data.orbitals.empty()
+            && !data.orbitals.front().q_grid.empty()
+            && !data.orbitals.front().q_weights.empty()
+            && !data.atomic_density.r_weights.empty())
+        {
+            pseudo.short_range_radius = data.atomic_density.r_grid.empty()
+                ? 0.0
+                : data.atomic_density.r_grid.back();
+            pseudo.short_range_charge = radial_charge(
+                data.atomic_density.r_grid,
+                data.atomic_density.r_values
+            );
+            pseudo.short_range_q_grid = data.orbitals.front().q_grid;
+            pseudo.short_range_q_weights = data.orbitals.front().q_weights;
+            pseudo.short_range_fq = radial_ft_l0(
+                data.atomic_density.r_grid,
+                data.atomic_density.r_values,
+                data.atomic_density.r_weights,
+                pseudo.short_range_q_grid
+            );
+        }
+    }
+    if (data.has_partial_core)
+    {
+        const auto values = interpolate_spline_zero(
+            data.partial_core.r_grid,
+            data.partial_core.r_values,
+            grid
+        );
+        for (int ir = 0; ir < mesh; ++ir)
+        {
+            pseudo.rho_atc[ir] = values[ir];
+        }
+    }
     pseudo.vloc_at.assign(mesh, 0.0);
+    if (data.has_local_potential)
+    {
+        pseudo.vloc_r = data.local_potential.r_grid;
+        pseudo.vloc_rab = data.local_potential.r_weights.empty()
+            ? radial_steps(data.local_potential.r_grid)
+            : data.local_potential.r_weights;
+        pseudo.vloc_at_radial.resize(data.local_potential.r_values.size());
+        for (size_t ir = 0; ir < data.local_potential.r_values.size(); ++ir)
+        {
+            pseudo.vloc_at_radial[ir] = 2.0 * data.local_potential.r_values[ir];
+        }
+        const auto values = interpolate_spline_zero(
+            data.local_potential.r_grid,
+            data.local_potential.r_values,
+            grid
+        );
+        for (int ir = 0; ir < mesh; ++ir)
+        {
+            pseudo.vloc_at[ir] = 2.0 * values[ir];
+        }
+    }
     pseudo.rcut = rcut > 0.0 ? rcut : grid.back();
     pseudo.msh = mesh;
     for (int index = 0; index < mesh; ++index)
@@ -482,7 +718,7 @@ void fill_atom_pseudo_from_atomic_data(const AtomicData& data, Atom_pseudo& pseu
     for (int iorb = 0; iorb < pseudo.nchi; ++iorb)
     {
         const auto values =
-            interpolate_linear(data.orbitals[iorb].r_grid, data.orbitals[iorb].r_values, grid);
+            interpolate_spline_zero(data.orbitals[iorb].r_grid, data.orbitals[iorb].r_values, grid);
         for (int ir = 0; ir < mesh; ++ir)
         {
             pseudo.chi(iorb, ir) = values[ir];
@@ -499,7 +735,7 @@ void fill_atom_pseudo_from_atomic_data(const AtomicData& data, Atom_pseudo& pseu
         pseudo.lll[ibeta] = projector.angular_momentum;
         pseudo.jjj[ibeta] = static_cast<double>(projector.angular_momentum);
         pseudo.dion(ibeta, ibeta) = projector.kb_energy;
-        const auto values = interpolate_linear(projector.r_grid, projector.r_values, grid);
+        const auto values = interpolate_spline_zero(projector.r_grid, projector.r_values, grid);
         for (int ir = 0; ir < mesh; ++ir)
         {
             pseudo.betar(ibeta, ir) = grid[ir] * values[ir];

@@ -169,6 +169,29 @@ class Op2c:
     def get_beta_rcut_max(self, itype: int) -> float:
         """Maximum beta projector cutoff radius for given atom type."""
         return self._handle.get_beta_rcut_max(itype)
+
+    def valence_charge(self, itype: int) -> float:
+        """Pseudopotential valence charge ``Atom_pseudo::zv`` for ``itype``."""
+        return float(self._handle.valence_charge(itype))
+
+    def vloc_rgrid(self, itype: int) -> np.ndarray:
+        """Radial grid for the local pseudopotential of ``itype`` in Bohr."""
+        return np.asarray(self._handle.vloc_rgrid(itype), dtype=np.float64)
+
+    def vloc_at(self, itype: int) -> np.ndarray:
+        """Local potential of ``itype`` in Rydberg on :meth:`vloc_rgrid`.
+
+        For rescumat MAT files this is the neutral atom potential ``data.Vna``.
+        """
+        return np.asarray(self._handle.vloc_at(itype), dtype=np.float64)
+
+    def atomic_density_rgrid(self, itype: int) -> np.ndarray:
+        """Radial grid for the neutral atomic density of ``itype`` in Bohr."""
+        return np.asarray(self._handle.atomic_density_rgrid(itype), dtype=np.float64)
+
+    def atomic_density_at(self, itype: int) -> np.ndarray:
+        """Neutral atomic density of ``itype`` on :meth:`atomic_density_rgrid`."""
+        return np.asarray(self._handle.atomic_density_at(itype), dtype=np.float64)
     
     def overlap(self, itype: int, jtype: int, Rij: Sequence[float],
                 transpose: bool = False) -> np.ndarray:

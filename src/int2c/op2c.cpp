@@ -2,10 +2,18 @@
 #include "math/linalg/matrix.h"
 #include <iostream>
 #include <fstream>
+#include <algorithm>
+#include <atomic>
+#include <array>
+#include <cstring>
+#include <exception>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
-Op2c::Op2c(size_t ntype, int nspin, bool lspinorb, 
+Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
-        MPI_Comm comm, const std::string& log_file
+        MPI_Comm comm, const std::string& log_file, bool pm_build
         ):
         comm(comm), nspin(nspin), lspinorb(lspinorb)
 {
@@ -26,7 +34,7 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
     }
     ModuleBase::Logger logger(log_file.empty() ? std::cout : ofs);
 
-    tcbd.build_orb(ntype, orb_name.data(), orb_dir, comm);
+    tcbd.build_orb(ntype, orb_name.data(), orb_dir, pm_build, comm);
 
     if(!psd_name.empty()) {
         psds.resize(ntype);
@@ -36,7 +44,7 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         for(size_t itype=0; itype<ntype; ++itype){
             beta_radials[itype] = psds[itype].beta_radials;
         }
-        tcbd.build_beta(ntype, beta_radials.data());
+        tcbd.build_beta(ntype, beta_radials.data(), pm_build);
     }
 
     build_maps();
@@ -45,14 +53,15 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
 Op2c::Op2c(
     std::vector<AtomicRadials> orbitals,
     std::vector<Atom_pseudo> pseudos,
-    int nspin, bool lspinorb
+    int nspin, bool lspinorb,
+    bool pm_build
     ):
     comm(0), nspin(nspin), lspinorb(lspinorb),
     psds(std::move(pseudos))
 {
     size_t ntype = orbitals.size();
 
-    tcbd.build_orb(ntype, orbitals.data());
+    tcbd.build_orb(ntype, orbitals.data(), pm_build);
 
     if(!psds.empty()) {
         if (psds.size() != ntype){
@@ -62,7 +71,7 @@ Op2c::Op2c(
         for(size_t itype=0; itype<ntype; ++itype){
             beta_radials[itype] = psds[itype].beta_radials;
         }
-        tcbd.build_beta(ntype, beta_radials.data());
+        tcbd.build_beta(ntype, beta_radials.data(), pm_build);
     }
 
     build_maps();
@@ -259,6 +268,212 @@ void Op2c::kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, 
     if (grad_out != nullptr) delete[] grad_out;
 }
 
+void Op2c::two_center_batch(int kind,
+                            const int* itypes, const int* jtypes, const double* rij,
+                            size_t npair,
+                            std::vector<double>& flat_out,
+                            std::vector<long>& offsets_out)
+{
+    if (kind != 0 && kind != 1) {
+        throw std::invalid_argument(
+            "Op2c::two_center_batch: kind must be 0 (overlap) or 1 (kinetic)");
+    }
+
+    // Per-pair block sizes + prefix offsets (cheap, serial).
+    offsets_out.assign(npair + 1, 0);
+    for (size_t p = 0; p < npair; ++p) {
+        const int ni = tcbd.orb_->nphi(static_cast<size_t>(itypes[p]));
+        const int nj = tcbd.orb_->nphi(static_cast<size_t>(jtypes[p]));
+        offsets_out[p + 1] = offsets_out[p] + static_cast<long>(ni) * nj;
+    }
+    flat_out.assign(static_cast<size_t>(offsets_out[npair]), 0.0);
+
+    // Threaded per-pair evaluation. op2c's two-center eval is thread-safe
+    // (const tables; see test_concurrency). An exception in any worker is
+    // captured and rethrown after the region (throwing across an OpenMP region
+    // is undefined).
+    std::atomic<bool> failed{false};
+    std::exception_ptr eptr;
+    #pragma omp parallel for schedule(dynamic)
+    for (long long p = 0; p < static_cast<long long>(npair); ++p) {
+        if (failed.load(std::memory_order_relaxed)) continue;
+        try {
+            const size_t itp = static_cast<size_t>(itypes[p]);
+            const size_t jtp = static_cast<size_t>(jtypes[p]);
+            const int ni = tcbd.orb_->nphi(itp);
+            const int nj = tcbd.orb_->nphi(jtp);
+            ModuleBase::Vector3<double> R(rij[3 * p + 0], rij[3 * p + 1], rij[3 * p + 2]);
+            std::vector<double> v(static_cast<size_t>(ni) * nj, 0.0);
+            if (kind == 0) {
+                overlap(itp, jtp, R, false, v, nullptr, nullptr, nullptr);
+            } else {
+                kinetic(itp, jtp, R, false, v, nullptr, nullptr, nullptr);
+            }
+            std::copy(v.begin(), v.end(), flat_out.begin() + offsets_out[p]);
+        } catch (...) {
+            #pragma omp critical
+            {
+                if (!eptr) eptr = std::current_exception();
+            }
+            failed.store(true, std::memory_order_relaxed);
+        }
+    }
+    if (eptr) {
+        std::rethrow_exception(eptr);
+    }
+}
+
+namespace {
+// (i, j, R) block key for V_nl accumulation across projector atoms.
+struct VnlKey {
+    int i, j, sx, sy, sz;
+    bool operator==(const VnlKey& o) const {
+        return i == o.i && j == o.j && sx == o.sx && sy == o.sy && sz == o.sz;
+    }
+};
+struct VnlKeyHash {
+    std::size_t operator()(const VnlKey& k) const {
+        std::size_t h = 1469598103934665603ull;  // FNV-ish combine
+        for (int v : {k.i, k.j, k.sx, k.sy, k.sz}) {
+            h = (h ^ static_cast<std::size_t>(static_cast<unsigned>(v))) * 1099511628211ull;
+        }
+        return h;
+    }
+};
+using VnlMap = std::unordered_map<VnlKey, std::vector<double>, VnlKeyHash>;
+
+inline void accumulate_block(VnlMap& acc, const VnlKey& key, const ModuleBase::matrix& block) {
+    const std::size_t n = static_cast<std::size_t>(block.nr) * block.nc;
+    std::vector<double>& dst = acc[key];
+    if (dst.empty()) {
+        dst.assign(n, 0.0);
+    }
+    for (std::size_t e = 0; e < n; ++e) {
+        dst[e] += block.c[e];
+    }
+}
+}  // namespace
+
+void Op2c::vnl_batch(const int* k_types, size_t n_K,
+                     const long* neigh_off,
+                     const int* neigh_gidx, const int* neigh_type,
+                     const int* neigh_shift, const double* neigh_disp,
+                     int n_types, const int* dm_dim, const double* dm_flat,
+                     std::vector<int>& out_i, std::vector<int>& out_j,
+                     std::vector<int>& out_shift,
+                     std::vector<double>& out_flat,
+                     std::vector<long>& out_off)
+{
+    // Rebuild the per-type m-expanded D matrices (caller passes them as flat
+    // row-major data; they depend only on element type).
+    std::vector<ModuleBase::matrix> Dmat(static_cast<size_t>(n_types));
+    {
+        long off = 0;
+        for (int t = 0; t < n_types; ++t) {
+            const int d = dm_dim[t];
+            if (d > 0) {
+                Dmat[t].create(d, d, false);
+                std::memcpy(Dmat[t].c, dm_flat + off, static_cast<size_t>(d) * d * sizeof(double));
+                off += static_cast<long>(d) * d;
+            }
+        }
+    }
+
+    VnlMap global;
+    std::atomic<bool> failed{false};
+    std::exception_ptr eptr;
+
+    #pragma omp parallel
+    {
+        VnlMap local;
+        #pragma omp for schedule(dynamic)
+        for (long long k = 0; k < static_cast<long long>(n_K); ++k) {
+            if (failed.load(std::memory_order_relaxed)) continue;
+            try {
+                const size_t type_K = static_cast<size_t>(k_types[k]);
+                const long beg = neigh_off[k];
+                const long end = neigh_off[k + 1];
+                const int m = static_cast<int>(end - beg);
+                if (m <= 0) continue;
+
+                std::vector<size_t> itypes_v(static_cast<size_t>(m));
+                std::vector<ModuleBase::Vector3<double>> Ri(static_cast<size_t>(m));
+                for (int a = 0; a < m; ++a) {
+                    itypes_v[a] = static_cast<size_t>(neigh_type[beg + a]);
+                    Ri[a].set(neigh_disp[3 * (beg + a) + 0],
+                              neigh_disp[3 * (beg + a) + 1],
+                              neigh_disp[3 * (beg + a) + 2]);
+                }
+                std::vector<ModuleBase::matrix> ob(m), oxb(m), oyb(m), ozb(m);
+                ModuleBase::Vector3<double> Rk(0.0, 0.0, 0.0);
+                // V_nl needs only the <phi|beta> values, not the position blocks.
+                orb_r_beta(itypes_v, type_K, Ri, Rk, false, ob, oxb, oyb, ozb, /*with_grad=*/false);
+
+                const ModuleBase::matrix& D = Dmat[type_K];
+                // W[a] = <phi_a|beta_K> * D_K (skip orbitals beyond the table cutoff).
+                std::vector<ModuleBase::matrix> W(static_cast<size_t>(m));
+                for (int a = 0; a < m; ++a) {
+                    if (ob[a].nc > 0) W[a] = ob[a] * D;
+                }
+                for (int in = 0; in < m; ++in) {
+                    if (ob[in].nc == 0) continue;
+                    const int gi = neigh_gidx[beg + in];
+                    const int six = neigh_shift[3 * (beg + in) + 0];
+                    const int siy = neigh_shift[3 * (beg + in) + 1];
+                    const int siz = neigh_shift[3 * (beg + in) + 2];
+                    for (int jn = 0; jn < m; ++jn) {
+                        if (ob[jn].nc == 0) continue;
+                        ModuleBase::matrix block = W[in] * transpose(ob[jn]);
+                        VnlKey key{gi, neigh_gidx[beg + jn],
+                                   neigh_shift[3 * (beg + jn) + 0] - six,
+                                   neigh_shift[3 * (beg + jn) + 1] - siy,
+                                   neigh_shift[3 * (beg + jn) + 2] - siz};
+                        accumulate_block(local, key, block);
+                    }
+                }
+            } catch (...) {
+                #pragma omp critical
+                {
+                    if (!eptr) eptr = std::current_exception();
+                }
+                failed.store(true, std::memory_order_relaxed);
+            }
+        }
+        #pragma omp critical
+        {
+            for (auto& kv : local) {
+                std::vector<double>& dst = global[kv.first];
+                if (dst.empty()) {
+                    dst = std::move(kv.second);
+                } else {
+                    for (std::size_t e = 0; e < dst.size(); ++e) dst[e] += kv.second[e];
+                }
+            }
+        }
+    }
+    if (eptr) {
+        std::rethrow_exception(eptr);
+    }
+
+    // Emit the accumulated blocks as flat arrays.
+    const size_t n_out = global.size();
+    out_i.clear(); out_i.reserve(n_out);
+    out_j.clear(); out_j.reserve(n_out);
+    out_shift.clear(); out_shift.reserve(3 * n_out);
+    out_off.clear(); out_off.reserve(n_out + 1);
+    out_flat.clear();
+    out_off.push_back(0);
+    for (auto& kv : global) {
+        out_i.push_back(kv.first.i);
+        out_j.push_back(kv.first.j);
+        out_shift.push_back(kv.first.sx);
+        out_shift.push_back(kv.first.sy);
+        out_shift.push_back(kv.first.sz);
+        out_flat.insert(out_flat.end(), kv.second.begin(), kv.second.end());
+        out_off.push_back(static_cast<long>(out_flat.size()));
+    }
+}
+
 void Op2c::overlap_position(
     size_t itype, size_t jtype,
     ModuleBase::Vector3<double> Ri, ModuleBase::Vector3<double> Rj,
@@ -320,12 +535,13 @@ void Op2c::overlap_position(
 }
 
 void Op2c::orb_r_beta(
-    std::vector<size_t>& itype, size_t ktype, 
+    std::vector<size_t>& itype, size_t ktype,
     std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
     bool is_transpose,
     // output
-    std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb, 
-    std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb
+    std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb,
+    std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb,
+    bool with_grad
 ){
     int inorb, knorb;
     int il, izeta, im;
@@ -352,17 +568,18 @@ void Op2c::orb_r_beta(
 
         inorb = tcbd.orb_->nphi(itype[i]);
         ob[i].create(inorb, knorb, true);
-        oxb[i].create(inorb, knorb, true);
-        oyb[i].create(inorb, knorb, true);
-        ozb[i].create(inorb, knorb, true);
-        
+        if (with_grad) {
+            oxb[i].create(inorb, knorb, true);
+            oyb[i].create(inorb, knorb, true);
+            ozb[i].create(inorb, knorb, true);
+        }
 
         for (int io=0; io<inorb; ++io){
             for (int ko=0; ko<knorb; ++ko){
                 il = orb_map.get_value<int>(itype[i], io, 0);
                 izeta = orb_map.get_value<int>(itype[i], io, 1);
                 im = orb_map.get_value<int>(itype[i], io, 2);
-                
+
                 kl = beta_map.get_value<int>(ktype, ko, 0);
                 kzeta = beta_map.get_value<int>(ktype, ko, 1);
                 km = beta_map.get_value<int>(ktype, ko, 2);
@@ -374,13 +591,21 @@ void Op2c::orb_r_beta(
                 }
 
                 m_phase = (im+km) % 2 == 0 ? 1 : -1;
-                
-                tcbd.overlap_orb_beta->calculate(itype[i], il, izeta, im, ktype, kl, kzeta, km, Rk-Ri[i], Rk, ob[i].c+shift, oxb[i].c+shift, oyb[i].c+shift, ozb[i].c+shift);
 
-                ob[i].c[shift] *= m_phase;
-                oxb[i].c[shift] *= m_phase;
-                oyb[i].c[shift] *= m_phase;
-                ozb[i].c[shift] *= m_phase;
+                if (with_grad) {
+                    // ob = <phi|beta>, oxb/oyb/ozb = <phi|r|beta> (position op,
+                    // needs the position-augmented beta tables).
+                    tcbd.overlap_orb_beta->calculate(itype[i], il, izeta, im, ktype, kl, kzeta, km, Rk-Ri[i], Rk, ob[i].c+shift, oxb[i].c+shift, oyb[i].c+shift, ozb[i].c+shift);
+                    ob[i].c[shift] *= m_phase;
+                    oxb[i].c[shift] *= m_phase;
+                    oyb[i].c[shift] *= m_phase;
+                    ozb[i].c[shift] *= m_phase;
+                } else {
+                    // values only: <phi|beta>, no position blocks. Uses the plain
+                    // overlap path so it works with pm_build=false.
+                    tcbd.overlap_orb_beta->calculate(itype[i], il, izeta, im, ktype, kl, kzeta, km, Rk-Ri[i], ob[i].c+shift, nullptr);
+                    ob[i].c[shift] *= m_phase;
+                }
             }
         }
     }
@@ -520,6 +745,128 @@ double Op2c::get_beta_rcut_max(int itype) const {
     return 0.0;
 }
 
+double Op2c::valence_charge(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::valence_charge: itype out of range");
+    }
+    return psds[itype].zv;
+}
+
+std::vector<double> Op2c::vloc_rgrid(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::vloc_rgrid: itype out of range");
+    }
+    const Atom_pseudo& pp = psds[itype];
+    return pp.vloc_r.empty() ? pp.r : pp.vloc_r;
+}
+
+std::vector<double> Op2c::vloc_rab(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::vloc_rab: itype out of range");
+    }
+    const Atom_pseudo& pp = psds[itype];
+    return pp.vloc_rab.empty() ? pp.rab : pp.vloc_rab;
+}
+
+int Op2c::vloc_msh(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::vloc_msh: itype out of range");
+    }
+    const Atom_pseudo& pp = psds[itype];
+    if (!pp.vloc_r.empty()) {
+        return static_cast<int>(pp.vloc_r.size());
+    }
+    if (pp.msh > 0) {
+        return pp.msh;
+    }
+    return static_cast<int>(pp.r.size());
+}
+
+std::vector<double> Op2c::vloc_at(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::vloc_at: itype out of range");
+    }
+    const Atom_pseudo& pp = psds[itype];
+    return pp.vloc_at_radial.empty() ? pp.vloc_at : pp.vloc_at_radial;
+}
+
+std::vector<double> Op2c::atomic_density_rgrid(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::atomic_density_rgrid: itype out of range");
+    }
+    return psds[itype].r;
+}
+
+std::vector<double> Op2c::atomic_density_rab(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::atomic_density_rab: itype out of range");
+    }
+    return psds[itype].rab;
+}
+
+std::vector<double> Op2c::atomic_density_at(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::atomic_density_at: itype out of range");
+    }
+    return psds[itype].rho_at;
+}
+
+double Op2c::short_range_radius(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::short_range_radius: itype out of range");
+    }
+    return psds[itype].short_range_radius;
+}
+
+double Op2c::short_range_charge(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::short_range_charge: itype out of range");
+    }
+    return psds[itype].short_range_charge;
+}
+
+std::vector<double> Op2c::short_range_q_grid(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::short_range_q_grid: itype out of range");
+    }
+    return psds[itype].short_range_q_grid;
+}
+
+std::vector<double> Op2c::short_range_q_weights(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::short_range_q_weights: itype out of range");
+    }
+    return psds[itype].short_range_q_weights;
+}
+
+std::vector<double> Op2c::short_range_fq(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::short_range_fq: itype out of range");
+    }
+    return psds[itype].short_range_fq;
+}
+
+bool Op2c::has_partial_core(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::has_partial_core: itype out of range");
+    }
+    return psds[itype].nlcc;
+}
+
+std::vector<double> Op2c::partial_core_rgrid(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::partial_core_rgrid: itype out of range");
+    }
+    return psds[itype].r;
+}
+
+std::vector<double> Op2c::partial_core_at(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::partial_core_at: itype out of range");
+    }
+    return psds[itype].rho_atc;
+}
+
 int Op2c::beta_nbeta(int itype) const {
     if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
         throw std::out_of_range("Op2c::beta_nbeta: itype out of range");
@@ -546,12 +893,12 @@ std::vector<double> Op2c::beta_dion(int itype) const {
     const auto& pp = psds[itype];
     const int n = pp.nbeta;
     std::vector<double> out(n * n);
-    // psds[itype].d_real is a ModuleBase::matrix sized (nbeta, nbeta); copy
-    // into a row-major std::vector so the binding can produce a numpy array
-    // with shape (nbeta, nbeta).
+    // Return the channel-space projector strength matrix. ``d_real`` is
+    // m-resolved after ``Atom_pseudo::setup_nonlocal``; callers that need the
+    // m-resolved matrix expand this channel-space ``dion`` explicitly.
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
-            out[i * n + j] = pp.d_real(i, j);
+            out[i * n + j] = pp.dion(i, j);
         }
     }
     return out;
