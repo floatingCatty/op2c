@@ -194,6 +194,49 @@ void NumericalRadial::set_value(const bool for_r_space, const double* const valu
     }
 }
 
+void NumericalRadial::band_limit(double k_cut)
+{
+    if (k_cut <= 0.0 || nr_ < 2 || rvalue_.empty())
+    {
+        return;
+    }
+    // Ensure a spherical Bessel transformer is available for the r<->k transforms.
+    set_transformer(ModuleBase::SphericalBesselTransformer(false), 0);
+
+    // Uniform k-grid [0, k_cut]; values obtained by forward transform from r.
+    // dk oversamples relative to PI/rmax so features over [0, rmax] are resolved.
+    const double rmax_r = rgrid_[nr_ - 1];
+    const double dk = PI / rmax_r / 2.0;
+    int nk = static_cast<int>(std::ceil(k_cut / dk)) + 1;
+    if (nk < nr_)
+    {
+        nk = nr_;
+    }
+    set_uniform_grid(false, nk, k_cut, 't', false);
+
+    // Cosine-taper window: 1 below 0.8*k_cut, smoothly to 0 at k_cut.
+    const double k_start = 0.8 * k_cut;
+    std::vector<double> kw(static_cast<std::size_t>(nk_));
+    for (int ik = 0; ik < nk_; ++ik)
+    {
+        const double k = kgrid_[ik];
+        double w = 1.0;
+        if (k >= k_cut)
+        {
+            w = 0.0;
+        }
+        else if (k > k_start)
+        {
+            const double x = (k - k_start) / (k_cut - k_start);
+            const double c = std::cos(0.5 * PI * x);
+            w = c * c;
+        }
+        kw[static_cast<std::size_t>(ik)] = kvalue_[ik] * w;
+    }
+    // Back-transform the windowed k-values to r-space on the original r-grid.
+    set_value(false, kw.data(), pk_);
+}
+
 void NumericalRadial::wipe(const bool r_space, const bool k_space)
 {
 #ifdef __DEBUG

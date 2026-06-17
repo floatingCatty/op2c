@@ -66,6 +66,36 @@ class TestAtomicRadials(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(values)))
         self.assertTrue(np.any(np.abs(values[0]) > 0.0))
 
+    def test_evaluate_orbitals_grad_shapes_and_value_consistency(self):
+        """``evaluate_orbitals_grad`` returns (values, grad) with the right shapes,
+        and its ``values`` matches plain ``evaluate_orbitals``."""
+        orbitals = AtomicRadials.from_file(str(C_ORBITAL))
+        pts = np.array([[0.3, -0.4, 0.5], [1.1, 0.2, -0.7], [8.0, 0.0, 0.0]])
+        values, grad = orbitals.evaluate_orbitals_grad(pts)
+        self.assertEqual(values.shape, (3, orbitals.nphi))
+        self.assertEqual(grad.shape, (3, orbitals.nphi, 3))
+        self.assertTrue(np.all(np.isfinite(grad)))
+        np.testing.assert_allclose(values, orbitals.evaluate_orbitals(pts), atol=1e-13)
+
+    def test_evaluate_orbitals_grad_matches_finite_difference(self):
+        """∇φ from the kernel matches a central finite difference of φ (the
+        physics correctness gate for the forces/meta-GGA foundation)."""
+        orbitals = AtomicRadials.from_file(str(C_ORBITAL))
+        # Generic off-axis points well inside the orbital support (avoid r=0 and
+        # the cutoff edge where the spline derivative is one-sided).
+        rng = np.random.default_rng(0)
+        pts = rng.uniform(-2.0, 2.0, size=(12, 3))
+        pts = pts[np.linalg.norm(pts, axis=1) > 0.3]
+        _, grad = orbitals.evaluate_orbitals_grad(pts)
+        h = 1e-5
+        for a in range(3):
+            step = np.zeros(3)
+            step[a] = h
+            plus = orbitals.evaluate_orbitals(pts + step)
+            minus = orbitals.evaluate_orbitals(pts - step)
+            fd = (plus - minus) / (2.0 * h)
+            np.testing.assert_allclose(grad[:, :, a], fd, atol=1e-6, rtol=1e-5)
+
 
 class TestAtomPseudo(unittest.TestCase):
     """Test AtomPseudo binding and wrapper."""

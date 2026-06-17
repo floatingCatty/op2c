@@ -56,7 +56,11 @@ private:
 
     /// Shared init: tabulate + build orb_map/beta_map
     void build_maps();
-    
+
+    /// Reciprocal-space cutoff (1/Bohr) for Soler-Anglada orbital band-limiting,
+    /// applied to tcbd.orb_ in build_maps() before tabulate(); <= 0 disables it.
+    double orb_kcut_ = 0.0;
+
 public:
     TwoCenterBundle tcbd;
 
@@ -77,7 +81,8 @@ public:
         size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
         MPI_Comm comm, const std::string& log_file,
-        bool pm_build = true
+        bool pm_build = true,
+        double orb_kcut = 0.0
     );
 
     /*!
@@ -92,7 +97,8 @@ public:
         std::vector<AtomicRadials> orbitals,
         std::vector<Atom_pseudo> pseudos,
         int nspin, bool lspinorb,
-        bool pm_build = true
+        bool pm_build = true,
+        double orb_kcut = 0.0
     );
 
     ~Op2c() = default;
@@ -130,72 +136,6 @@ public:
     void kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose, std::vector<double>& v, std::vector<double>* dvx = nullptr, std::vector<double>* dvy = nullptr, std::vector<double>* dvz = nullptr);
 
     /*!
-     * @brief Batched, OpenMP-threaded two-center build over a whole pair list.
-     *
-     * Evaluates overlap (kind=0) or kinetic (kind=1) for @p npair atom pairs,
-     * parallelizing the per-pair op2c evaluation with OpenMP. Each pair's
-     * RowMajor inorb*jnorb block values are concatenated into @p flat_out;
-     * @p offsets_out[p]..offsets_out[p+1] slices pair p. No 0.5 is applied to
-     * the kinetic result (this mirrors kinetic(); callers convert to Hartree).
-     *
-     * This is the C++ home of the batch routine; the pybind layer is only a thin
-     * numpy<->vector marshalling wrapper around it (it releases the GIL).
-     *
-     * @param kind 0 = overlap S_ij, 1 = kinetic T_ij.
-     * @param itypes npair element types of the row (bra) atom.
-     * @param jtypes npair element types of the col (ket) atom.
-     * @param rij    npair*3 displacements R_col - R_row (row-major, Bohr).
-     * @param npair  number of pairs.
-     * @param[out] flat_out    concatenated block values (resized inside).
-     * @param[out] offsets_out npair+1 prefix offsets into flat_out (resized inside).
-     */
-    void two_center_batch(int kind,
-                          const int* itypes, const int* jtypes, const double* rij,
-                          size_t npair,
-                          std::vector<double>& flat_out,
-                          std::vector<long>& offsets_out);
-
-    /*!
-     * @brief Batched, OpenMP-threaded non-local (V_nl) build over projector atoms.
-     *
-     * Assembles the 3-center sum V_nl,ij(R) = sum_K <phi_i|beta_K> D_K
-     * <beta_K|phi_j>, accumulated over every projector atom K, parallelizing the
-     * per-K work (one orb_r_beta batch + the neighbour (i,j) products) over K.
-     * Different K contribute to the same (i,j,R) block, so accumulation uses
-     * thread-local maps merged after the parallel region. The per-type m-expanded
-     * D matrix is supplied by the caller (it depends only on the element type and
-     * is cheap to build once). This is the C++ home of the V_nl loop; the pybind
-     * layer is a thin numpy<->vector wrapper.
-     *
-     * Neighbour structure (CSR over the n_K owned projector atoms):
-     * @param k_types     op2c type of each projector atom K (size n_K).
-     * @param n_K         number of projector atoms.
-     * @param neigh_off   CSR offsets, size n_K+1.
-     * @param neigh_gidx  global atom index of each neighbour orbital atom i.
-     * @param neigh_type  op2c type of each neighbour i.
-     * @param neigh_shift 3 ints per neighbour: lattice shift of i relative to K.
-     * @param neigh_disp  3 doubles per neighbour: displacement r_i - r_K (Bohr).
-     * Per-type m-expanded D (only types with beta projectors are used):
-     * @param n_types     number of element types.
-     * @param dm_dim      n_phi_beta (D dimension) per type, size n_types.
-     * @param dm_flat     concatenated dm_dim[t]^2 row-major D matrices.
-     * Outputs (one entry per unique non-zero (i,j,R) block, accumulated):
-     * @param[out] out_i, out_j   global block indices.
-     * @param[out] out_shift      3 ints per block (R_j - R_i).
-     * @param[out] out_flat       concatenated RowMajor n_orb_i*n_orb_j values.
-     * @param[out] out_off        prefix offsets into out_flat, size n_out+1.
-     */
-    void vnl_batch(const int* k_types, size_t n_K,
-                   const long* neigh_off,
-                   const int* neigh_gidx, const int* neigh_type,
-                   const int* neigh_shift, const double* neigh_disp,
-                   int n_types, const int* dm_dim, const double* dm_flat,
-                   std::vector<int>& out_i, std::vector<int>& out_j,
-                   std::vector<int>& out_shift,
-                   std::vector<double>& out_flat,
-                   std::vector<long>& out_off);
-
-    /*!
      * @brief Computes overlap and position operator integrals simultaneously.
      *
      * Computes < phi_i | phi_j > and < phi_i | r | phi_j >.
@@ -219,9 +159,11 @@ public:
     );
 
     /*!
-     * @brief Computes integrals between atomic orbitals and beta projectors < phi_i | beta_k >.
+     * @brief Orbital-projector overlap < phi_i | beta_k > and its POSITION operator.
      *
-     * Used for constructing the non-local pseudopotential part of the Hamiltonian.
+     * Used for constructing the non-local pseudopotential part of the Hamiltonian and
+     * for the position-operator (Berry phase / velocity / TDDFT) commutators consumed by
+     * ::ncomm_IKJ.
      *
      * @param itype List of atom types for the bra side (orbitals).
      * @param ktype Atom type for the ket side (beta projector).
@@ -229,21 +171,47 @@ public:
      * @param Rk Position of the beta projector atom.
      * @param is_transpose If true, transpose the result.
      * @param[out] ob Overlap < phi | beta >.
-     * @param[out] oxb x-derivative < d_phi/dx | beta > (or gradient w.r.t R).
-     * @param[out] oyb y-derivative.
-     * @param[out] ozb z-derivative.
+     * @param[out] oxb Position operator < phi | x | beta > (global frame).
+     * @param[out] oyb Position operator < phi | y | beta >.
+     * @param[out] ozb Position operator < phi | z | beta >.
+     *
+     * with_pos=true computes ob plus the position blocks oxb/oyb/ozb = <phi|r|beta>
+     * (needs the position-augmented beta tables, i.e. pm_build=true). with_pos=false
+     * computes ONLY ob (values), via the plain overlap path — valid with pm_build=false.
+     * NOTE: this is the POSITION operator, not a gradient; the Pulay force uses
+     * ::orb_grad_beta below.
      */
-    // with_grad=true computes ob = <phi|beta> plus the position blocks
-    // oxb/oyb/ozb = <phi|r|beta> (needs the position-augmented beta tables, i.e.
-    // pm_build=true). with_grad=false computes ONLY ob (values), via the plain
-    // overlap path — valid with pm_build=false and all V_nl needs.
     void orb_r_beta(
         std::vector<size_t>& itype, size_t ktype,
         std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
         bool is_transpose,
         std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb,
         std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb,
-        bool with_grad = true
+        bool with_pos = true
+    );
+
+    /*!
+     * @brief Orbital-projector overlap and its analytic GRADIENT < grad phi_i | beta_k >.
+     *
+     * The orb-beta sibling of ::overlap (the orbital gradient w.r.t. the orbital center).
+     * For a single (i, k) pair the two-center integral is
+     *   I(vR) = \int phi_i(r) beta_k(r - vR) dr,   vR = Rk - Ri,
+     * and the tabulated gradient d I / d vR equals < grad phi_i | beta_k > (integration by
+     * parts). This is exactly what the non-local Pulay force needs and, unlike the position
+     * operator above, it is computed from the PLAIN overlap-beta table — no pm_build, no
+     * position-augmented (l +/- 1) tables.
+     *
+     * @param[out] ob  Overlap < phi | beta >.
+     * @param[out] gxb x-component < d phi / dx | beta >.
+     * @param[out] gyb y-component.
+     * @param[out] gzb z-component.
+     */
+    void orb_grad_beta(
+        std::vector<size_t>& itype, size_t ktype,
+        std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
+        bool is_transpose,
+        std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& gxb,
+        std::vector<ModuleBase::matrix>& gyb, std::vector<ModuleBase::matrix>& gzb
     );
 
     /*!

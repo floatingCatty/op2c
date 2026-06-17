@@ -71,6 +71,19 @@ void RadialCollection::set_rcut_max()
     }
 }
 
+void RadialCollection::band_limit(double k_cut)
+{
+    if (k_cut <= 0.0)
+    {
+        return;
+    }
+    for (int itype = 0; itype < ntype_; ++itype)
+    {
+        radset_[itype]->band_limit(k_cut);
+    }
+    set_rcut_max();
+}
+
 void RadialCollection::cleanup()
 {
     radset_.clear();

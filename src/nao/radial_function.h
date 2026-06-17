@@ -190,6 +190,18 @@ public:
     void normalize(bool for_r_space = true);
 
     /**
+     * @brief Band-limit the radial in reciprocal space (Soler-Anglada style).
+     *
+     * Forward spherical-Bessel transforms r -> k on a uniform k-grid [0, k_cut],
+     * multiplies the k-space values by a cosine-taper window that is 1 below
+     * 0.8*k_cut and 0 at k_cut, then back-transforms to update the r-space values
+     * on the existing r-grid. Suppresses Fourier content above the real-space grid
+     * Nyquist so the uniform-grid V_eff/density integration is egg-box-free.
+     * No-op when @p k_cut <= 0. Same r-grid in/out; rcut/rmax unchanged.
+     */
+    void band_limit(double k_cut);
+
+    /**
      * @name Getters
      */
     ///@{

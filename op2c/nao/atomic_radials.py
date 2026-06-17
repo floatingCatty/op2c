@@ -67,6 +67,15 @@ class AtomicRadials:
         xyz = np.ascontiguousarray(xyz_bohr, dtype=np.float64)
         return self._handle.evaluate_orbitals(xyz)
 
+    def evaluate_orbitals_grad(self, xyz_bohr: np.ndarray):
+        """Evaluate orbitals AND their Cartesian gradients ∇φ at relative points.
+
+        Returns ``(values, grad)`` with shapes ``(n, nphi)`` and ``(n, nphi, 3)``
+        (``grad[p, i, a] = ∂φ_i/∂x_a``). Foundation for forces/stress and meta-GGA.
+        """
+        xyz = np.ascontiguousarray(xyz_bohr, dtype=np.float64)
+        return self._handle.evaluate_orbitals_grad(xyz)
+
     def __len__(self) -> int:
         return len(self._handle)
 

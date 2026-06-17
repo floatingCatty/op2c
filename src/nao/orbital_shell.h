@@ -135,6 +135,10 @@ class RadialSet
     const NumericalRadial* cend() const { return chi_ + nchi_; }
     ///@}
 
+    /// Band-limit every radial below @p k_cut (see NumericalRadial::band_limit);
+    /// no-op when k_cut <= 0. Recomputes rcut_max_ afterwards.
+    void band_limit(double k_cut);
+
     /**
      * @name Property setters for all NumericalRadial objects
      */

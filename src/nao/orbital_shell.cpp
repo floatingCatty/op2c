@@ -21,6 +21,19 @@ RadialSet::~RadialSet()
     delete[] index_map_;
 }
 
+void RadialSet::band_limit(double k_cut)
+{
+    if (k_cut <= 0.0)
+    {
+        return;
+    }
+    for (int i = 0; i < nchi_; i++)
+    {
+        chi_[i].band_limit(k_cut);
+    }
+    set_rcut_max();
+}
+
 RadialSet::RadialSet(const RadialSet& other) :
     symbol_(other.symbol_),
     itype_(other.itype_),

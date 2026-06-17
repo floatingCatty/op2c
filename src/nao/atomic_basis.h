@@ -118,6 +118,12 @@ class RadialCollection
     /// Sets a spherical Bessel transformers for all RadialSet objects.
     void set_transformer(ModuleBase::SphericalBesselTransformer sbt, const int update = 0);
 
+    /// Band-limit every radial of every type below @p k_cut (Soler-Anglada
+    /// reciprocal-space confinement; see NumericalRadial::band_limit). No-op when
+    /// k_cut <= 0. Call BEFORE TwoCenterBundle::tabulate so the two-center tables
+    /// and any grid evaluator share the same band-limited orbitals.
+    void band_limit(double k_cut);
+
     /// Sets a common grid for all RadialSet objects.
     void set_grid(const bool for_r_space, const int ngrid, const double* grid, const char mode = 'i');
 

@@ -61,6 +61,31 @@ class OrbitalEvaluator
      */
     void evaluate_all(int npoint, const double* xyz, double* out) const;
 
+    /*!
+     * @brief Evaluate the @p active orbitals AND their Cartesian gradients at one
+     * relative point (Bohr).
+     *
+     * Fills @p values (length nphi(), inactive entries 0) and @p grad (length
+     * nphi()*3, row-major: `grad[3*iorb + a] = d phi_iorb / d x_a`, inactive 0).
+     * ∇φ = (dR/dr)(r_hat) Y_lm + R ∇Y_lm — the radial spline derivative composed
+     * with the Ylm gradient (``ModuleBase::Ylm::get_ylm_real`` value+grad). Same
+     * rcut_max early-out as :func:`evaluate_active`. Foundation for forces/stress
+     * (Pulay grid term) and meta-GGA τ (doc 32 §5 gap 5).
+     */
+    bool evaluate_active_grad(double x, double y, double z,
+                              const std::vector<int>& active,
+                              std::vector<double>& values,
+                              std::vector<double>& grad) const;
+
+    /*!
+     * @brief Evaluate **all** orbitals + gradients at @p npoint points.
+     *
+     * @p values is (npoint, nphi()) and @p grad is (npoint, nphi(), 3), both
+     * row-major. Reference path for the gradient (matches :func:`evaluate_all`).
+     */
+    void evaluate_all_grad(int npoint, const double* xyz,
+                           double* values, double* grad) const;
+
   private:
     struct RadialEval
     {
@@ -80,6 +105,13 @@ class OrbitalEvaluator
     bool evaluate_point(double x, double y, double z,
                         const int* active, int n_active,
                         double* values) const;
+
+    // Core per-point value+gradient evaluation shared by evaluate_active_grad /
+    // evaluate_all_grad. @p values (len nphi) and @p grad (len nphi*3) must be
+    // pre-zeroed by the caller; only listed in-range orbitals are written.
+    bool evaluate_point_grad(double x, double y, double z,
+                             const int* active, int n_active,
+                             double* values, double* grad) const;
 
     AtomicRadials radials_;
     int nphi_ = 0;

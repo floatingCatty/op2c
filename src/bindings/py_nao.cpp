@@ -49,6 +49,33 @@ py::array_t<double> evaluate_atomic_orbitals(AtomicRadials& radials, py::array_t
     return out;
 }
 
+// Orbital values AND Cartesian gradients at relative points; returns
+// (values (n, nphi), grad (n, nphi, 3)). Reference path for ∇φ (forces/meta-GGA).
+py::tuple evaluate_atomic_orbitals_grad(AtomicRadials& radials, py::array_t<double, py::array::c_style | py::array::forcecast> xyz) {
+    auto buf = xyz.request();
+    if (buf.ndim != 2 || buf.shape[1] != 3) {
+        throw std::runtime_error("AtomicRadials.evaluate_orbitals_grad expects xyz_bohr with shape (n, 3)");
+    }
+    const auto* coords = static_cast<const double*>(buf.ptr);
+    const py::ssize_t n_point = buf.shape[0];
+    for (py::ssize_t i = 0; i < n_point * 3; ++i) {
+        if (!std::isfinite(coords[i])) {
+            throw std::runtime_error("AtomicRadials.evaluate_orbitals_grad requires finite coordinates");
+        }
+    }
+    OrbitalEvaluator evaluator(radials);
+    const int n_phi = evaluator.nphi();
+    py::array_t<double> values({n_point, static_cast<py::ssize_t>(n_phi)});
+    py::array_t<double> grad({n_point, static_cast<py::ssize_t>(n_phi), static_cast<py::ssize_t>(3)});
+    auto* vptr = static_cast<double*>(values.request().ptr);
+    auto* gptr = static_cast<double*>(grad.request().ptr);
+    {
+        py::gil_scoped_release release;
+        evaluator.evaluate_all_grad(static_cast<int>(n_point), coords, vptr, gptr);
+    }
+    return py::make_tuple(values, grad);
+}
+
 py::array_t<double> copy_double_vector(const std::vector<double>& values) {
     py::array_t<double> arr(values.size());
     if (!values.empty()) {
@@ -248,7 +275,10 @@ void bind_atomic_radials(py::module &m) {
             return py::make_iterator(self.cbegin(), self.cend());
         }, py::keep_alive<0, 1>())
         .def("evaluate_orbitals", &evaluate_atomic_orbitals, py::arg("xyz_bohr"),
-             "Evaluate atomic orbitals at relative Cartesian points in Bohr."); 
+             "Evaluate atomic orbitals at relative Cartesian points in Bohr.")
+        .def("evaluate_orbitals_grad", &evaluate_atomic_orbitals_grad, py::arg("xyz_bohr"),
+             "Evaluate atomic orbitals AND their Cartesian gradients (∇φ) at "
+             "relative points in Bohr; returns (values (n, nphi), grad (n, nphi, 3)).");
 }
 
 void bind_beta_radials(py::module &m) {
@@ -392,6 +422,8 @@ void bind_radial_collection(py::module &m) {
              py::arg("for_r_space"), py::arg("ngrid"), py::arg("cutoff"),
              py::arg("mode")='i', py::arg("enable_fft")=false)
 
+        .def("band_limit", &RadialCollection::band_limit, py::arg("k_cut"))
+
         .def("__repr__", [](const RadialCollection& self) -> std::string {
             return "<RadialCollection ntype=" + std::to_string(self.ntype()) + 
                    " nchi=" + std::to_string(self.nchi()) + ">";
@@ -465,23 +497,26 @@ void bind_op2c(py::module &m) {
         .def(py::init([](size_t ntype, int nspin, bool lspinorb,
                          const std::string& orb_dir, const std::vector<std::string> orb_name,
                          const std::string& psd_dir, const std::vector<std::string> psd_name,
-                         const std::string& log_file, int mpi_handle, bool pm_build) {
+                         const std::string& log_file, int mpi_handle, bool pm_build,
+                         double orb_kcut) {
             MPI_Comm comm = op2c_default_comm(mpi_handle);
-            return new Op2c(ntype, nspin, lspinorb, orb_dir, orb_name, psd_dir, psd_name, comm, log_file, pm_build);
+            return new Op2c(ntype, nspin, lspinorb, orb_dir, orb_name, psd_dir, psd_name, comm, log_file, pm_build, orb_kcut);
         }),
         py::arg("ntype"), py::arg("nspin"), py::arg("lspinorb"),
         py::arg("orb_dir"), py::arg("orb_name"),
         py::arg("psd_dir") = "", py::arg("psd_name") = std::vector<std::string>(),
-        py::arg("log_file") = "", py::arg("mpi_handle") = 0, py::arg("pm_build") = true)
+        py::arg("log_file") = "", py::arg("mpi_handle") = 0, py::arg("pm_build") = true,
+        py::arg("orb_kcut") = 0.0)
 
         // Constructor from pre-loaded objects
         .def(py::init([](std::vector<AtomicRadials> orbitals,
                          std::vector<Atom_pseudo> pseudos,
-                         int nspin, bool lspinorb, bool pm_build) {
-            return new Op2c(std::move(orbitals), std::move(pseudos), nspin, lspinorb, pm_build);
+                         int nspin, bool lspinorb, bool pm_build, double orb_kcut) {
+            return new Op2c(std::move(orbitals), std::move(pseudos), nspin, lspinorb, pm_build, orb_kcut);
         }),
         py::arg("orbitals"), py::arg("pseudos") = std::vector<Atom_pseudo>(),
-        py::arg("nspin") = 1, py::arg("lspinorb") = false, py::arg("pm_build") = true)
+        py::arg("nspin") = 1, py::arg("lspinorb") = false, py::arg("pm_build") = true,
+        py::arg("orb_kcut") = 0.0)
 
         // Access to bundle
         .def_readonly("tcbd", &Op2c::tcbd)
@@ -637,93 +672,6 @@ void bind_op2c(py::module &m) {
                 py::array(dvz.size(), dvz.data())
             );
         })
-
-        // Thin marshalling wrapper over Op2c::two_center_batch (the threaded
-        // C++ routine lives on the class). Validates the numpy arrays, releases
-        // the GIL for the threaded build, and wraps the result back to numpy.
-        //   kind: 0 = overlap S_ij, 1 = kinetic T_ij.
-        //   itypes/jtypes: (npair,) element types of the row/col atom of each pair.
-        //   rij: (npair, 3) displacement R_col - R_row (Bohr).
-        // Returns (flat_values, offsets): flat is every block's RowMajor
-        // inorb*jnorb values concatenated; offsets[p]..offsets[p+1] slices pair p.
-        .def("two_center_batch", [](Op2c& self, int kind,
-                py::array_t<int, py::array::c_style | py::array::forcecast> itypes,
-                py::array_t<int, py::array::c_style | py::array::forcecast> jtypes,
-                py::array_t<double, py::array::c_style | py::array::forcecast> rij) {
-            const py::ssize_t npair = itypes.shape(0);
-            if (jtypes.shape(0) != npair || rij.ndim() != 2
-                || rij.shape(0) != npair || rij.shape(1) != 3) {
-                throw std::invalid_argument("two_center_batch: itypes/jtypes/rij shape mismatch");
-            }
-            std::vector<double> flat;
-            std::vector<long> offsets;
-            {
-                py::gil_scoped_release release;
-                self.two_center_batch(kind, itypes.data(), jtypes.data(), rij.data(),
-                                      static_cast<size_t>(npair), flat, offsets);
-            }
-            py::array_t<double> out_flat(static_cast<py::ssize_t>(flat.size()));
-            if (!flat.empty()) {
-                std::memcpy(out_flat.mutable_data(), flat.data(), flat.size() * sizeof(double));
-            }
-            py::array_t<long> out_off(static_cast<py::ssize_t>(offsets.size()));
-            std::memcpy(out_off.mutable_data(), offsets.data(), offsets.size() * sizeof(long));
-            return py::make_tuple(out_flat, out_off);
-        }, py::arg("kind"), py::arg("itypes"), py::arg("jtypes"), py::arg("rij"),
-           "Thin wrapper over Op2c::two_center_batch (kind 0=overlap, 1=kinetic); returns (flat_values, offsets).")
-
-        // Thin marshalling wrapper over Op2c::vnl_batch (the threaded 3-center
-        // V_nl build lives on the class). Inputs are the per-projector-atom
-        // neighbour CSR + per-type m-expanded D; returns the accumulated blocks.
-        .def("vnl_batch", [](Op2c& self,
-                py::array_t<int, py::array::c_style | py::array::forcecast> k_types,
-                py::array_t<long, py::array::c_style | py::array::forcecast> neigh_off,
-                py::array_t<int, py::array::c_style | py::array::forcecast> neigh_gidx,
-                py::array_t<int, py::array::c_style | py::array::forcecast> neigh_type,
-                py::array_t<int, py::array::c_style | py::array::forcecast> neigh_shift,
-                py::array_t<double, py::array::c_style | py::array::forcecast> neigh_disp,
-                py::array_t<int, py::array::c_style | py::array::forcecast> dm_dim,
-                py::array_t<double, py::array::c_style | py::array::forcecast> dm_flat) {
-            const size_t n_K = static_cast<size_t>(k_types.shape(0));
-            if (static_cast<size_t>(neigh_off.shape(0)) != n_K + 1) {
-                throw std::invalid_argument("vnl_batch: neigh_off must have length n_K+1");
-            }
-            const py::ssize_t n_neigh = neigh_gidx.shape(0);
-            if (neigh_type.shape(0) != n_neigh || neigh_disp.shape(0) != n_neigh
-                || neigh_disp.shape(1) != 3 || neigh_shift.size() != n_neigh * 3) {
-                throw std::invalid_argument("vnl_batch: neighbour array shape mismatch");
-            }
-            std::vector<int> out_i, out_j, out_shift;
-            std::vector<double> out_flat;
-            std::vector<long> out_off;
-            {
-                py::gil_scoped_release release;
-                self.vnl_batch(k_types.data(), n_K, neigh_off.data(),
-                               neigh_gidx.data(), neigh_type.data(),
-                               neigh_shift.data(), neigh_disp.data(),
-                               static_cast<int>(dm_dim.shape(0)), dm_dim.data(), dm_flat.data(),
-                               out_i, out_j, out_shift, out_flat, out_off);
-            }
-            const py::ssize_t n_out = static_cast<py::ssize_t>(out_i.size());
-            py::array_t<int> a_i(n_out), a_j(n_out);
-            py::array_t<int> a_shift({n_out, static_cast<py::ssize_t>(3)});
-            py::array_t<double> a_flat(static_cast<py::ssize_t>(out_flat.size()));
-            py::array_t<long> a_off(static_cast<py::ssize_t>(out_off.size()));
-            if (n_out > 0) {
-                std::memcpy(a_i.mutable_data(), out_i.data(), out_i.size() * sizeof(int));
-                std::memcpy(a_j.mutable_data(), out_j.data(), out_j.size() * sizeof(int));
-                std::memcpy(a_shift.mutable_data(), out_shift.data(), out_shift.size() * sizeof(int));
-            }
-            if (!out_flat.empty()) {
-                std::memcpy(a_flat.mutable_data(), out_flat.data(), out_flat.size() * sizeof(double));
-            }
-            std::memcpy(a_off.mutable_data(), out_off.data(), out_off.size() * sizeof(long));
-            return py::make_tuple(a_i, a_j, a_shift, a_flat, a_off);
-        }, py::arg("k_types"), py::arg("neigh_off"), py::arg("neigh_gidx"),
-           py::arg("neigh_type"), py::arg("neigh_shift"), py::arg("neigh_disp"),
-           py::arg("dm_dim"), py::arg("dm_flat"),
-           "Thin wrapper over Op2c::vnl_batch; returns (i, j, shift, flat_blocks, offsets).")
-
         .def("overlap_position", [](Op2c& self, size_t itype, size_t jtype,
                                     ModuleBase::Vector3<double> Ri, ModuleBase::Vector3<double> Rj, 
                                     bool is_transpose) {
@@ -745,14 +693,24 @@ void bind_op2c(py::module &m) {
 
         .def("orb_r_beta", [](Op2c& self, std::vector<size_t>& itype, size_t ktype,
                               std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
-                              bool is_transpose, bool with_grad) {
+                              bool is_transpose, bool with_pos) {
             std::vector<ModuleBase::matrix> ob(itype.size()), oxb(itype.size()), oyb(itype.size()), ozb(itype.size());
 
-            self.orb_r_beta(itype, ktype, Ri, Rk, is_transpose, ob, oxb, oyb, ozb, with_grad);
+            self.orb_r_beta(itype, ktype, Ri, Rk, is_transpose, ob, oxb, oyb, ozb, with_pos);
             return py::make_tuple(ob, oxb, oyb, ozb);
         }, py::arg("itype"), py::arg("ktype"), py::arg("Ri"), py::arg("Rk"),
-           py::arg("is_transpose"), py::arg("with_grad") = true)
-        
+           py::arg("is_transpose"), py::arg("with_pos") = true)
+
+        .def("orb_grad_beta", [](Op2c& self, std::vector<size_t>& itype, size_t ktype,
+                                 std::vector<ModuleBase::Vector3<double>> Ri, ModuleBase::Vector3<double> Rk,
+                                 bool is_transpose) {
+            std::vector<ModuleBase::matrix> ob(itype.size()), gxb(itype.size()), gyb(itype.size()), gzb(itype.size());
+
+            self.orb_grad_beta(itype, ktype, Ri, Rk, is_transpose, ob, gxb, gyb, gzb);
+            return py::make_tuple(ob, gxb, gyb, gzb);
+        }, py::arg("itype"), py::arg("ktype"), py::arg("Ri"), py::arg("Rk"),
+           py::arg("is_transpose"))
+
         .def("ncomm_IKJ", [](Op2c& self, size_t itype, size_t idx, size_t ktype, size_t jtype, size_t jdx,
                              std::vector<ModuleBase::matrix>& ob, std::vector<ModuleBase::matrix>& oxb,
                              std::vector<ModuleBase::matrix>& oyb, std::vector<ModuleBase::matrix>& ozb,

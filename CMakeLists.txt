@@ -28,8 +28,13 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         include(GoogleTest)
     endif()
   endif()
-  find_package(MPI) # Try finding MPI, but don't error out yet
 endif()
+# Find MPI for BOTH the standalone (_op2c) and the add_subdirectory (rescu++ _core) builds.
+# The old top-level-only guard skipped this in the subdirectory build, leaving nao_int2c with
+# the stub `typedef int MPI_Comm` while _core uses real <mpi.h> — an ABI mismatch (Op2c ctor
+# undefined symbol / garbage handle). Running it unconditionally makes nao_int2c's MPI_Comm
+# match _core's so the C++ operator construction can call Op2c. See doc/design/38.
+find_package(MPI) # Try finding MPI, but don't error out yet
 
 if(NOT TARGET MPI::MPI_CXX)
   # If MPI not found, define dummy library for serial build
