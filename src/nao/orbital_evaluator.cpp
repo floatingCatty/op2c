@@ -27,6 +27,7 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
     nphi_ = radials_.nphi();
     lmax_ = radials_.lmax();
     rcut_max_ = radials_.rcut_max();
+    rcut_max2_ = rcut_max_ * rcut_max_;
     orbitals_.reserve(static_cast<std::size_t>(nphi_));
     for (int l = 0; l <= lmax_; ++l)
     {
@@ -186,22 +187,22 @@ void OrbitalEvaluator::active_orbitals_for_box(double cx, double cy, double cz,
 }
 
 void OrbitalEvaluator::fill_row(double x, double y, double z, double r,
-                                const int* active, int n_active, double* row) const
+                                const int* active, int n_active, double* row,
+                                EvalScratch& scratch) const
 {
     // (A) Cartesian real spherical harmonics: no atan / pow / Legendre / redundant norm.
     // r==0 -> unit vector (0,0,0): sph_harm gives l=0 only, l>0 -> 0 (and R(0)=0 there).
     const double inv_r = (r > 1e-12) ? 1.0 / r : 0.0;
-    thread_local std::vector<double> ylm;
-    ModuleBase::Ylm::sph_harm(lmax_, x * inv_r, y * inv_r, z * inv_r, ylm);  // resizes ylm
+    ModuleBase::Ylm::sph_harm(lmax_, x * inv_r, y * inv_r, z * inv_r, scratch.ylm);  // resizes
 
     // (B) all radials at r in one pass — index/weights computed once and shared.
+    // scratch.rad_val is pre-sized to radial_evals_.size() by the batch caller.
     const std::size_t n_rad = radial_evals_.size();
-    thread_local std::vector<double> rad_val;
-    rad_val.resize(n_rad);
+    double* rad_val = scratch.rad_val.data();
     if (shared_radials_)
     {
-        if (r <= shared_rmax_) { shared_spline_->multi_eval(r, rad_val.data()); }
-        else { std::fill(rad_val.begin(), rad_val.end(), 0.0); }  // past rmax -> 0
+        if (r <= shared_rmax_) { shared_spline_->multi_eval(r, rad_val); }
+        else { std::fill(rad_val, rad_val + n_rad, 0.0); }  // past rmax -> 0
     }
     else
     {
@@ -218,6 +219,7 @@ void OrbitalEvaluator::fill_row(double x, double y, double z, double r,
     }
 
     // (C) flat per-orbital combine: no struct lookups / index math in the hot loop.
+    const double* ylm = scratch.ylm.data();
     for (int a = 0; a < n_active; ++a)
     {
         const std::size_t iorb = static_cast<std::size_t>(active[a]);
@@ -229,10 +231,10 @@ void OrbitalEvaluator::fill_row(double x, double y, double z, double r,
 
 bool OrbitalEvaluator::evaluate_point(double x, double y, double z,
                                       const int* active, int n_active,
-                                      double* values) const
+                                      double* values, EvalScratch& scratch) const
 {
     const double r = std::sqrt(x * x + y * y + z * z);
-    fill_row(x, y, z, r, active, n_active, values);
+    fill_row(x, y, z, r, active, n_active, values, scratch);
     for (int a = 0; a < n_active; ++a)
     {
         if (values[static_cast<std::size_t>(active[a])] != 0.0) return true;
@@ -249,18 +251,22 @@ void OrbitalEvaluator::evaluate_active_batch(int npoint, const double* xyz, int 
     }
     const int n_active = static_cast<int>(active.size());
     const int* act = active.data();
+    EvalScratch scratch;                              // one scratch per batch sweep
+    scratch.rad_val.resize(radial_evals_.size());     // sized once, reused per point
     for (int ip = 0; ip < npoint; ++ip)
     {
         const double x = xyz[3 * ip];
         const double y = xyz[3 * ip + 1];
         const double z = xyz[3 * ip + 2];
-        const double r = std::sqrt(x * x + y * y + z * z);
-        if (r > rcut_max_)
+        const double r2 = x * x + y * y + z * z;
+        if (r2 > rcut_max2_)
         {
-            continue;  // grid-projector convention: point past the largest cutoff
+            continue;  // grid-projector convention: skip past the largest cutoff (no sqrt)
         }
+        const double r = std::sqrt(r2);
         fill_row(x, y, z, r, act, n_active,
-                 out + static_cast<std::size_t>(ip) * static_cast<std::size_t>(out_stride));
+                 out + static_cast<std::size_t>(ip) * static_cast<std::size_t>(out_stride),
+                 scratch);
     }
 }
 
@@ -268,11 +274,14 @@ void OrbitalEvaluator::evaluate_all(int npoint, const double* xyz, double* out) 
 {
     std::vector<int> all(static_cast<std::size_t>(nphi_));
     std::iota(all.begin(), all.end(), 0);
+    EvalScratch scratch;
+    scratch.rad_val.resize(radial_evals_.size());
     for (int ip = 0; ip < npoint; ++ip)
     {
         double* row = out + static_cast<std::size_t>(ip) * nphi_;
         std::fill(row, row + nphi_, 0.0);
-        evaluate_point(xyz[3 * ip + 0], xyz[3 * ip + 1], xyz[3 * ip + 2], all.data(), nphi_, row);
+        evaluate_point(xyz[3 * ip + 0], xyz[3 * ip + 1], xyz[3 * ip + 2], all.data(), nphi_, row,
+                       scratch);
     }
 }
 
@@ -289,7 +298,10 @@ bool OrbitalEvaluator::evaluate_point_grad(double x, double y, double z,
     constexpr double kCenterEps = 1.0e-6;
     if (r < kCenterEps)
     {
-        evaluate_point(x, y, z, active, n_active, values);
+        // Cold path (grid point on an atom centre); a local scratch is fine here.
+        thread_local EvalScratch scratch;
+        scratch.rad_val.resize(radial_evals_.size());
+        evaluate_point(x, y, z, active, n_active, values, scratch);
         const double delta = 1.0e-3;
         // thread_local scratch: this central-difference branch fires once per
         // grid point that coincides with an atom centre (cold force path), but
@@ -306,8 +318,8 @@ bool OrbitalEvaluator::evaluate_point_grad(double x, double y, double z,
             xm[d] -= delta;
             std::fill(vp.begin(), vp.end(), 0.0);
             std::fill(vm.begin(), vm.end(), 0.0);
-            evaluate_point(xp[0], xp[1], xp[2], active, n_active, vp.data());
-            evaluate_point(xm[0], xm[1], xm[2], active, n_active, vm.data());
+            evaluate_point(xp[0], xp[1], xp[2], active, n_active, vp.data(), scratch);
+            evaluate_point(xm[0], xm[1], xm[2], active, n_active, vm.data(), scratch);
             for (int a = 0; a < n_active; ++a)
             {
                 const int iorb = active[a];

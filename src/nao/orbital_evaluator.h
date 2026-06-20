@@ -102,20 +102,30 @@ class OrbitalEvaluator
         int m = 0;
     };
 
+    // Per-thread scratch for the point loop, hoisted out of fill_row so a batch sweep
+    // pays the buffer setup once instead of per point (no per-point thread_local access).
+    struct EvalScratch
+    {
+        std::vector<double> ylm;      // (lmax+1)^2 real spherical harmonics at the point
+        std::vector<double> rad_val;  // one radial value per distinct radial (radial_evals_)
+    };
+
     // Core per-point evaluation shared by evaluate_active / evaluate_all.
     // @p values must be pre-zeroed by the caller; only listed orbitals in range
     // are written. Returns true if any written value is non-zero.
     bool evaluate_point(double x, double y, double z,
                         const int* active, int n_active,
-                        double* values) const;
+                        double* values, EvalScratch& scratch) const;
 
     // Fill one point's active-orbital values into @p row (pre-zeroed by caller).
     // @p r = |(x,y,z)|. The hot kernel: (A) Cartesian real spherical harmonics via
     // Ylm::sph_harm (no atan/pow/Legendre); (B) all radials in one CubicSpline::multi_eval
     // (index/weights computed once, shared across radials); (C) flat per-orbital
-    // {radial, ylm-slot, sign} tables (no per-point struct lookups).
+    // {radial, ylm-slot, sign} tables (no per-point struct lookups). @p scratch.rad_val
+    // must be pre-sized to radial_evals_.size() by the caller.
     void fill_row(double x, double y, double z, double r,
-                  const int* active, int n_active, double* row) const;
+                  const int* active, int n_active, double* row,
+                  EvalScratch& scratch) const;
 
     // Core per-point value+gradient evaluation shared by evaluate_active_grad /
     // evaluate_all_grad. @p values (len nphi) and @p grad (len nphi*3) must be
@@ -128,6 +138,7 @@ class OrbitalEvaluator
     int nphi_ = 0;
     int lmax_ = 0;
     double rcut_max_ = 0.0;
+    double rcut_max2_ = 0.0;  // rcut_max_^2, for the squared-distance cutoff (skip sqrt)
     std::vector<RadialEval> radial_evals_;
     std::vector<OrbitalEntry> orbitals_;
 
