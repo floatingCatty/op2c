@@ -42,17 +42,6 @@ class OrbitalEvaluator
                                  std::vector<int>& active) const;
 
     /*!
-     * @brief Evaluate the @p active orbitals at one relative point (Bohr).
-     *
-     * Fills @p values (length nphi(), inactive/out-of-range entries set to 0);
-     * returns true if any value is non-zero. Early-outs when the point is beyond
-     * rcut_max() (the grid-projector convention).
-     */
-    bool evaluate_active(double x, double y, double z,
-                         const std::vector<int>& active,
-                         std::vector<double>& values) const;
-
-    /*!
      * @brief Evaluate the @p active orbitals at a BATCH of relative points (Bohr).
      *
      * Atom-batched hot path (ABACUS ``GintAtom::set_phi``): one call per atom-image
@@ -120,6 +109,14 @@ class OrbitalEvaluator
                         const int* active, int n_active,
                         double* values) const;
 
+    // Fill one point's active-orbital values into @p row (pre-zeroed by caller).
+    // @p r = |(x,y,z)|. The hot kernel: (A) Cartesian real spherical harmonics via
+    // Ylm::sph_harm (no atan/pow/Legendre); (B) all radials in one CubicSpline::multi_eval
+    // (index/weights computed once, shared across radials); (C) flat per-orbital
+    // {radial, ylm-slot, sign} tables (no per-point struct lookups).
+    void fill_row(double x, double y, double z, double r,
+                  const int* active, int n_active, double* row) const;
+
     // Core per-point value+gradient evaluation shared by evaluate_active_grad /
     // evaluate_all_grad. @p values (len nphi) and @p grad (len nphi*3) must be
     // pre-zeroed by the caller; only listed in-range orbitals are written.
@@ -133,4 +130,18 @@ class OrbitalEvaluator
     double rcut_max_ = 0.0;
     std::vector<RadialEval> radial_evals_;
     std::vector<OrbitalEntry> orbitals_;
+
+    // Optimization B: all radials in ONE shared-knot CubicSpline (multi_eval evaluates
+    // them at a point with the index/weights computed once). Built only when every radial
+    // shares the same uniform knots; else shared_radials_ stays false and fill_row uses
+    // the per-radial radial_evals_ splines.
+    std::unique_ptr<ModuleBase::CubicSpline> shared_spline_;
+    bool shared_radials_ = false;
+    double shared_rmax_ = 0.0;
+
+    // Optimization C: flat per-orbital tables (size nphi_) so the per-point loop is
+    // row[iorb] = orb_sign_[iorb] * rad_val[orb_radial_[iorb]] * ylm[orb_slot_[iorb]].
+    std::vector<int> orb_radial_;   // radial (spline-interpolant) index
+    std::vector<int> orb_slot_;     // ylm array slot = ylm_index(l, m)
+    std::vector<double> orb_sign_;  // sign factor for the sph_harm convention
 };

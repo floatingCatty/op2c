@@ -68,7 +68,15 @@ class TestAtomicRadials(unittest.TestCase):
 
     def test_evaluate_orbitals_grad_shapes_and_value_consistency(self):
         """``evaluate_orbitals_grad`` returns (values, grad) with the right shapes,
-        and its ``values`` matches plain ``evaluate_orbitals``."""
+        and its ``values`` matches plain ``evaluate_orbitals`` everywhere.
+
+        The two paths use DIFFERENT angular kernels: ``evaluate_orbitals`` goes
+        through the fast Cartesian ``Ylm::sph_harm`` plus the per-element
+        (slot, sign) mapping, while the grad path uses ``Ylm::get_ylm_real``
+        directly. They must produce identical values for every orbital. A
+        convention mismatch (channel order / sign at high l) would only show up
+        at some directions, so sweep MANY random points across the full support
+        and ALL orbitals, not a handful of hand-picked ones."""
         orbitals = AtomicRadials.from_file(str(C_ORBITAL))
         pts = np.array([[0.3, -0.4, 0.5], [1.1, 0.2, -0.7], [8.0, 0.0, 0.0]])
         values, grad = orbitals.evaluate_orbitals_grad(pts)
@@ -76,6 +84,17 @@ class TestAtomicRadials(unittest.TestCase):
         self.assertEqual(grad.shape, (3, orbitals.nphi, 3))
         self.assertTrue(np.all(np.isfinite(grad)))
         np.testing.assert_allclose(values, orbitals.evaluate_orbitals(pts), atol=1e-13)
+
+        # Hard convention gate: dense random sweep over [0, ~2*rcut], including
+        # near-origin and exact-origin points (the sph_harm r->0 branch).
+        rng = np.random.default_rng(1234)
+        rc = orbitals.rcut_max
+        sweep = rng.uniform(-2.0 * rc, 2.0 * rc, size=(5000, 3))
+        sweep = np.vstack([sweep, np.zeros((1, 3)), 1e-7 * np.eye(3)])
+        v_sph = orbitals.evaluate_orbitals(sweep)          # sph_harm + mapping
+        v_get, _ = orbitals.evaluate_orbitals_grad(sweep)  # get_ylm_real
+        self.assertTrue(np.any(np.abs(v_sph) > 0.0))       # not a trivial all-zero match
+        np.testing.assert_allclose(v_sph, v_get, atol=1e-12, rtol=0.0)
 
     def test_evaluate_orbitals_grad_matches_finite_difference(self):
         """∇φ from the kernel matches a central finite difference of φ (the
