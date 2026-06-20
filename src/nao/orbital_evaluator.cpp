@@ -19,6 +19,23 @@ inline int ylm_index(const int l, const int m)
     return base + 2 * (-m);
 }
 inline double m_phase(const int m) { return (m % 2 == 0) ? 1.0 : -1.0; }
+
+// True iff radial @p r lies on the uniform knot set {r0 + i*dr : i = 0..nr-1} (within a
+// relative tolerance). Checks knot POSITIONS against the model, not consecutive gaps, so
+// tiny per-gap errors can't accumulate undetected. dr <= 0 (malformed/decreasing) -> false.
+// The single source of truth for "is this radial on the common uniform grid?".
+bool radial_on_uniform_grid(const NumericalRadial& r, double r0, double dr, int nr)
+{
+    if (r.nr() != nr || dr <= 0.0) return false;
+    const double* g = r.rgrid();
+    const double tol = dr * 1e-6;
+    if (std::abs(g[0] - r0) > tol) return false;
+    for (int i = 1; i < nr; ++i)
+    {
+        if (std::abs(g[i] - (r0 + i * dr)) > tol) return false;
+    }
+    return true;
+}
 }  // namespace
 
 OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
@@ -28,6 +45,9 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
     lmax_ = radials_.lmax();
     rcut_max_ = radials_.rcut_max();
     rcut_max2_ = rcut_max_ * rcut_max_;
+    // Pass 1: collect the element's radials (in (l, izeta) order) and the per-m orbital
+    // entries referencing them. Splines are built in pass 2, once the grid model is known.
+    std::vector<const NumericalRadial*> rads;
     orbitals_.reserve(static_cast<std::size_t>(nphi_));
     for (int l = 0; l <= lmax_; ++l)
     {
@@ -38,38 +58,8 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
             {
                 throw std::runtime_error("OrbitalEvaluator requires r-space radial grids");
             }
-            const std::size_t radial_index = radial_evals_.size();
-            // Build the radial spline. If the r-grid is uniform (NAO .orb grids are,
-            // dr const), use the evenly-spaced-knot constructor so CubicSpline::eval takes
-            // its O(1) index path (xmin + p·dr) instead of a per-eval binary search over the
-            // ~800-point grid — the ABACUS-gint ``dr_uniform`` trick. Fall back to the
-            // general (binary-search) constructor for a non-uniform grid.
-            const int nr = radial.nr();
-            const double* rg = radial.rgrid();
-            const double r0 = rg[0];
-            const double dr = rg[1] - rg[0];   // candidate spacing (verified below)
-            // Use the uniform-knot constructor ONLY if the grid really is evenly spaced:
-            // the fast constructor places knots at r0 + i*dr, so check that EVERY real knot
-            // rg[i] matches that model (checking knot positions, not consecutive gaps, so
-            // tiny per-gap errors can't accumulate undetected). dr > 0 is required by the
-            // constructor and rules out a malformed/decreasing grid.
-            bool uniform = (dr > 0.0);
-            if (uniform)
-            {
-                const double tol = dr * 1e-6;
-                for (int i = 2; i < nr; ++i)   // i=1 matches r0+dr by definition of dr
-                {
-                    if (std::abs(rg[i] - (r0 + i * dr)) > tol)
-                    {
-                        uniform = false;
-                        break;
-                    }
-                }
-            }
-            auto spline = uniform
-                ? std::make_unique<ModuleBase::CubicSpline>(nr, r0, dr, radial.rvalue())  // O(1) eval
-                : std::make_unique<ModuleBase::CubicSpline>(nr, rg, radial.rvalue());      // general (binary search)
-            radial_evals_.push_back({&radial, std::move(spline)});
+            const std::size_t radial_index = rads.size();
+            rads.push_back(&radial);
             for (int m = -l; m <= l; ++m)
             {
                 orbitals_.push_back({radial_index, l, m});
@@ -79,6 +69,38 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
     if (static_cast<int>(orbitals_.size()) != nphi_)
     {
         throw std::runtime_error("OrbitalEvaluator orbital count does not match nphi()");
+    }
+
+    // Class-level grid model, decided ONCE: do ALL radials share one uniform knot grid?
+    // NAO .orb grids do (so the fast paths below + uniform_grid() switch on it); arbitrary
+    // grids take the general binary-search path. Reference grid = the first radial's.
+    if (!rads.empty())
+    {
+        const double* g0 = rads[0]->rgrid();
+        grid_nr_ = rads[0]->nr();
+        grid_r0_ = g0[0];
+        grid_dr_ = (grid_nr_ > 1) ? g0[1] - g0[0] : 0.0;
+        uniform_grid_ = true;
+        for (const NumericalRadial* r : rads)
+        {
+            if (!radial_on_uniform_grid(*r, grid_r0_, grid_dr_, grid_nr_))
+            {
+                uniform_grid_ = false;
+                break;
+            }
+        }
+    }
+
+    // Pass 2: build the per-radial spline. uniform_grid_ -> evenly-spaced-knot constructor so
+    // CubicSpline::eval takes its O(1) index path (xmin + p*dr) instead of a binary search
+    // over the ~800-point grid (the ABACUS-gint dr_uniform trick); else the general one.
+    radial_evals_.reserve(rads.size());
+    for (const NumericalRadial* r : rads)
+    {
+        auto spline = uniform_grid_
+            ? std::make_unique<ModuleBase::CubicSpline>(grid_nr_, grid_r0_, grid_dr_, r->rvalue())
+            : std::make_unique<ModuleBase::CubicSpline>(r->nr(), r->rgrid(), r->rvalue());
+        radial_evals_.push_back({r, std::move(spline)});
     }
 
     // Optimization C + A: flat per-orbital tables. fill_row uses the fast Cartesian
@@ -135,37 +157,18 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
         }
     }
 
-    // Optimization B: if every radial shares the same uniform knots, hold them all in one
-    // CubicSpline so multi_eval evaluates them with the index/weights computed once.
-    if (!radial_evals_.empty())
+    // Optimization B (uniform_grid_ only): hold all radials in one shared CubicSpline so
+    // multi_eval evaluates them at a point with the index/weights computed once. The grid
+    // model (grid_nr_/grid_r0_/grid_dr_) is already validated above — no re-check here.
+    if (uniform_grid_ && !radial_evals_.empty())
     {
-        const NumericalRadial& r0r = *radial_evals_[0].radial;
-        const int nr0 = r0r.nr();
-        const double* g0 = r0r.rgrid();
-        const double dr0 = (nr0 > 1) ? g0[1] - g0[0] : 0.0;
-        bool share = dr0 > 0.0;
-        const double tol = dr0 * 1e-6;
-        for (std::size_t ri = 0; ri < radial_evals_.size() && share; ++ri)
+        shared_spline_ = std::make_unique<ModuleBase::CubicSpline>(grid_nr_, grid_r0_, grid_dr_);
+        shared_spline_->reserve(static_cast<int>(radial_evals_.size()));
+        for (const RadialEval& re : radial_evals_)
         {
-            const NumericalRadial& rr = *radial_evals_[ri].radial;
-            const double* gi = rr.rgrid();
-            if (rr.nr() != nr0 || std::abs(gi[0] - g0[0]) > tol) { share = false; break; }
-            for (int k = 1; k < nr0; ++k)
-            {
-                if (std::abs(gi[k] - (g0[0] + k * dr0)) > tol) { share = false; break; }
-            }
+            shared_spline_->add(re.radial->rvalue());
         }
-        if (share)
-        {
-            shared_spline_ = std::make_unique<ModuleBase::CubicSpline>(nr0, g0[0], dr0);
-            shared_spline_->reserve(static_cast<int>(radial_evals_.size()));
-            for (std::size_t ri = 0; ri < radial_evals_.size(); ++ri)
-            {
-                shared_spline_->add(radial_evals_[ri].radial->rvalue());
-            }
-            shared_radials_ = true;
-            shared_rmax_ = g0[0] + (nr0 - 1) * dr0;
-        }
+        shared_rmax_ = grid_r0_ + (grid_nr_ - 1) * grid_dr_;
     }
 }
 
@@ -199,7 +202,7 @@ void OrbitalEvaluator::fill_row(double x, double y, double z, double r,
     // scratch.rad_val is pre-sized to radial_evals_.size() by the batch caller.
     const std::size_t n_rad = radial_evals_.size();
     double* rad_val = scratch.rad_val.data();
-    if (shared_radials_)
+    if (uniform_grid_)
     {
         if (r <= shared_rmax_) { shared_spline_->multi_eval(r, rad_val); }
         else { std::fill(rad_val, rad_val + n_rad, 0.0); }  // past rmax -> 0

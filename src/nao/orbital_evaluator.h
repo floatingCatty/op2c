@@ -29,6 +29,10 @@ class OrbitalEvaluator
     int nphi() const { return nphi_; }
     int lmax() const { return lmax_; }
     double rcut_max() const { return rcut_max_; }
+    // True iff all radials share ONE uniform knot grid — the class-level switch other
+    // methods use to take the fast O(1)-index / multi_eval path. False => arbitrary
+    // per-radial grids on the general binary-search path. Decided once in the ctor.
+    bool uniform_grid() const { return uniform_grid_; }
 
     /*!
      * @brief Orbitals whose radial cutoff can reach a box.
@@ -142,12 +146,19 @@ class OrbitalEvaluator
     std::vector<RadialEval> radial_evals_;
     std::vector<OrbitalEntry> orbitals_;
 
-    // Optimization B: all radials in ONE shared-knot CubicSpline (multi_eval evaluates
-    // them at a point with the index/weights computed once). Built only when every radial
-    // shares the same uniform knots; else shared_radials_ stays false and fill_row uses
-    // the per-radial radial_evals_ splines.
+    // Radial r-grid model, decided ONCE in the constructor and exposed via uniform_grid().
+    // NAO .orb grids are uniform (knots at grid_r0_ + i*grid_dr_, grid_nr_ of them); op2c
+    // also supports arbitrary grids, which fall back to the general binary-search CubicSpline
+    // + per-radial eval. Every method (spline build, fill_row's multi_eval, the gradient
+    // path) branches on uniform_grid_ instead of re-deriving the knot model.
+    bool uniform_grid_ = false;
+    double grid_r0_ = 0.0;
+    double grid_dr_ = 0.0;
+    int grid_nr_ = 0;
+    // Optimization B (uniform_grid_ only): all radials in ONE shared CubicSpline so
+    // multi_eval evaluates them with the index/weights computed once. shared_rmax_ is the
+    // last knot (support edge) of that common grid.
     std::unique_ptr<ModuleBase::CubicSpline> shared_spline_;
-    bool shared_radials_ = false;
     double shared_rmax_ = 0.0;
 
     // Optimization C: flat per-orbital tables (size nphi_) so the per-point loop is
