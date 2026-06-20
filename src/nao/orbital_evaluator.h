@@ -53,6 +53,20 @@ class OrbitalEvaluator
                          std::vector<double>& values) const;
 
     /*!
+     * @brief Evaluate the @p active orbitals at a BATCH of relative points (Bohr).
+     *
+     * Atom-batched hot path (ABACUS ``GintAtom::set_phi``): one call per atom-image
+     * sweeps all @p npoint box points, so per-atom setup is amortized and Φ is written
+     * straight into its column block — no per-point zero-fill or scratch copy. @p xyz is
+     * (npoint, 3) row-major relative coords; for each point the active orbitals are
+     * written to ``out[ip*out_stride + iorb]``. The caller pre-zeros @p out; points
+     * beyond ``rcut_max()`` and inactive/out-of-range orbitals are left untouched.
+     * Numerically identical to looping :func:`evaluate_active` over the points.
+     */
+    void evaluate_active_batch(int npoint, const double* xyz, int out_stride,
+                               const std::vector<int>& active, double* out) const;
+
+    /*!
      * @brief Evaluate **all** orbitals at @p npoint points (row-major xyz).
      *
      * Writes @p out as (npoint, nphi()) row-major. Uses only the per-orbital

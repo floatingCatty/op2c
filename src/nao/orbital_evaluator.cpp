@@ -38,9 +38,37 @@ OrbitalEvaluator::OrbitalEvaluator(AtomicRadials radials)
                 throw std::runtime_error("OrbitalEvaluator requires r-space radial grids");
             }
             const std::size_t radial_index = radial_evals_.size();
-            radial_evals_.push_back(
-                {&radial,
-                 std::make_unique<ModuleBase::CubicSpline>(radial.nr(), radial.rgrid(), radial.rvalue())});
+            // Build the radial spline. If the r-grid is uniform (NAO .orb grids are,
+            // dr const), use the evenly-spaced-knot constructor so CubicSpline::eval takes
+            // its O(1) index path (xmin + p·dr) instead of a per-eval binary search over the
+            // ~800-point grid — the ABACUS-gint ``dr_uniform`` trick. Fall back to the
+            // general (binary-search) constructor for a non-uniform grid.
+            const int nr = radial.nr();
+            const double* rg = radial.rgrid();
+            const double r0 = rg[0];
+            const double dr = rg[1] - rg[0];   // candidate spacing (verified below)
+            // Use the uniform-knot constructor ONLY if the grid really is evenly spaced:
+            // the fast constructor places knots at r0 + i*dr, so check that EVERY real knot
+            // rg[i] matches that model (checking knot positions, not consecutive gaps, so
+            // tiny per-gap errors can't accumulate undetected). dr > 0 is required by the
+            // constructor and rules out a malformed/decreasing grid.
+            bool uniform = (dr > 0.0);
+            if (uniform)
+            {
+                const double tol = dr * 1e-6;
+                for (int i = 2; i < nr; ++i)   // i=1 matches r0+dr by definition of dr
+                {
+                    if (std::abs(rg[i] - (r0 + i * dr)) > tol)
+                    {
+                        uniform = false;
+                        break;
+                    }
+                }
+            }
+            auto spline = uniform
+                ? std::make_unique<ModuleBase::CubicSpline>(nr, r0, dr, radial.rvalue())  // O(1) eval
+                : std::make_unique<ModuleBase::CubicSpline>(nr, rg, radial.rvalue());      // general (binary search)
+            radial_evals_.push_back({&radial, std::move(spline)});
             for (int m = -l; m <= l; ++m)
             {
                 orbitals_.push_back({radial_index, l, m});
@@ -75,23 +103,45 @@ bool OrbitalEvaluator::evaluate_point(double x, double y, double z,
                                       double* values) const
 {
     const double r = std::sqrt(x * x + y * y + z * z);
-    std::vector<double> ylm(static_cast<std::size_t>((lmax_ + 1) * (lmax_ + 1)));
+    // Reused per-thread Ylm buffer: avoids a heap allocation on EVERY (atom, point)
+    // call (build_box_phi calls this np * n_images times per box -> millions per grid).
+    thread_local std::vector<double> ylm;
+    ylm.resize(static_cast<std::size_t>((lmax_ + 1) * (lmax_ + 1)));
     ModuleBase::Vector3<double> vec(x, y, z);
     ModuleBase::Ylm::get_ylm_real(lmax_ + 1, vec, ylm.data());
+
+    // Evaluate each DISTINCT radial spline ONCE per point: the 2l+1 m-channels of a
+    // shell share one radial R_nl(r), so caching R by radial_index cuts spline evals
+    // from n_active down to the few distinct radials (13 -> 5 for Si). Byte-identical.
+    const std::size_t n_rad = radial_evals_.size();
+    thread_local std::vector<double> rad_val;
+    thread_local std::vector<char> rad_done;
+    rad_val.resize(n_rad);
+    rad_done.assign(n_rad, 0);
 
     bool has_nonzero = false;
     for (int a = 0; a < n_active; ++a)
     {
         const int iorb = active[a];
         const OrbitalEntry& orbital = orbitals_[static_cast<std::size_t>(iorb)];
-        const RadialEval& radial_eval = radial_evals_[orbital.radial_index];
-        const NumericalRadial& radial = *radial_eval.radial;
-        if (r < radial.rgrid(0) || r > radial.rmax())
+        const std::size_t ri = orbital.radial_index;
+        if (!rad_done[ri])
         {
-            continue;
+            const RadialEval& radial_eval = radial_evals_[ri];
+            const NumericalRadial& radial = *radial_eval.radial;
+            double rv = 0.0;
+            if (r >= radial.rgrid(0) && r <= radial.rmax())
+            {
+                radial_eval.spline->eval(1, &r, &rv);
+            }
+            rad_val[ri] = rv;
+            rad_done[ri] = 1;
         }
-        double radial_value = 0.0;
-        radial_eval.spline->eval(1, &r, &radial_value);
+        const double radial_value = rad_val[ri];
+        if (radial_value == 0.0)
+        {
+            continue;  // out-of-range / zero radial: values[iorb] stays pre-zeroed (as before)
+        }
         const double value =
             m_phase(orbital.m) * radial_value * ylm[static_cast<std::size_t>(ylm_index(orbital.l, orbital.m))];
         values[static_cast<std::size_t>(iorb)] = value;
@@ -115,6 +165,65 @@ bool OrbitalEvaluator::evaluate_active(double x, double y, double z,
         return false;
     }
     return evaluate_point(x, y, z, active.data(), static_cast<int>(active.size()), values.data());
+}
+
+void OrbitalEvaluator::evaluate_active_batch(int npoint, const double* xyz, int out_stride,
+                                             const std::vector<int>& active, double* out) const
+{
+    if (active.empty())
+    {
+        return;
+    }
+    const int n_active = static_cast<int>(active.size());
+    const int* act = active.data();
+    const std::size_t n_rad = radial_evals_.size();
+    // Per-thread scratch reused across points AND across calls (no per-point alloc).
+    thread_local std::vector<double> ylm;
+    thread_local std::vector<double> rad_val;
+    thread_local std::vector<char> rad_done;
+    ylm.resize(static_cast<std::size_t>((lmax_ + 1) * (lmax_ + 1)));
+    rad_val.resize(n_rad);
+
+    for (int ip = 0; ip < npoint; ++ip)
+    {
+        const double x = xyz[3 * ip];
+        const double y = xyz[3 * ip + 1];
+        const double z = xyz[3 * ip + 2];
+        const double r = std::sqrt(x * x + y * y + z * z);
+        if (r > rcut_max_)
+        {
+            continue;  // grid-projector convention: point past the largest cutoff
+        }
+        double* row = out + static_cast<std::size_t>(ip) * static_cast<std::size_t>(out_stride);
+        ModuleBase::Vector3<double> vec(x, y, z);
+        ModuleBase::Ylm::get_ylm_real(lmax_ + 1, vec, ylm.data());
+        rad_done.assign(n_rad, 0);   // distinct radial evaluated once per point
+        for (int a = 0; a < n_active; ++a)
+        {
+            const int iorb = act[a];
+            const OrbitalEntry& orbital = orbitals_[static_cast<std::size_t>(iorb)];
+            const std::size_t ri = orbital.radial_index;
+            if (!rad_done[ri])
+            {
+                const RadialEval& radial_eval = radial_evals_[ri];
+                const NumericalRadial& radial = *radial_eval.radial;
+                double rv = 0.0;
+                if (r >= radial.rgrid(0) && r <= radial.rmax())
+                {
+                    radial_eval.spline->eval(1, &r, &rv);
+                }
+                rad_val[ri] = rv;
+                rad_done[ri] = 1;
+            }
+            const double radial_value = rad_val[ri];
+            if (radial_value == 0.0)
+            {
+                continue;  // out-of-range/zero radial -> column stays pre-zeroed
+            }
+            row[iorb] = m_phase(orbital.m) * radial_value
+                        * ylm[static_cast<std::size_t>(ylm_index(orbital.l, orbital.m))];
+        }
+    }
 }
 
 void OrbitalEvaluator::evaluate_all(int npoint, const double* xyz, double* out) const
