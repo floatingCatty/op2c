@@ -340,29 +340,64 @@ bool OrbitalEvaluator::evaluate_point_grad(double x, double y, double z,
     }
 
     const int nlm = (lmax_ + 1) * (lmax_ + 1);
-    std::vector<double> ylm(static_cast<std::size_t>(nlm));
-    // dylm[lm][a] = d Y_lm(r_hat) / d x_a (flat (nlm, 3), passed as double[][3]).
-    std::vector<double> dylm(static_cast<std::size_t>(nlm) * 3);
+    // Hoisted per-thread scratch: this runs inside the OMP box loop of the ∇φ force
+    // kernel, so reuse the buffers across the whole sweep instead of heap-allocating
+    // ylm/dylm (and the radial value/deriv tables) at every grid point.
+    thread_local std::vector<double> ylm;
+    thread_local std::vector<double> dylm;   // dylm[lm][a] = dY_lm/dx_a, flat (nlm, 3)
+    thread_local std::vector<double> rad_val;
+    thread_local std::vector<double> rad_deriv;
+    ylm.assign(static_cast<std::size_t>(nlm), 0.0);
+    dylm.assign(static_cast<std::size_t>(nlm) * 3, 0.0);
     ModuleBase::Vector3<double> vec(x, y, z);
     ModuleBase::Ylm::get_ylm_real(lmax_ + 1, vec, ylm.data(),
                                   reinterpret_cast<double(*)[3]>(dylm.data()));
 
-    const double inv_r = (r > 0.0) ? 1.0 / r : 0.0;
+    const double inv_r = 1.0 / r;   // r >= kCenterEps on this path
     const double coord[3] = {x, y, z};
+
+    // (B) All radials' values AND first derivatives in ONE shared multi_eval (uniform
+    // grid) — the gradient sibling of fill_row's optimization. Replaces the per-orbital
+    // spline->eval below, which redundantly re-evaluated each radial once per m-degenerate
+    // copy (nphi evals -> 1 multi_eval; e.g. 13 -> 1 for a 2s2p1d Si set).
+    const bool use_shared = uniform_grid_ && shared_spline_;
+    if (use_shared)
+    {
+        const std::size_t n_rad = radial_evals_.size();
+        rad_val.assign(n_rad, 0.0);
+        rad_deriv.assign(n_rad, 0.0);
+        if (r <= shared_rmax_)
+        {
+            shared_spline_->multi_eval(r, rad_val.data(), rad_deriv.data());
+        }
+    }
+
     bool has_nonzero = false;
     for (int a = 0; a < n_active; ++a)
     {
         const int iorb = active[a];
         const OrbitalEntry& orbital = orbitals_[static_cast<std::size_t>(iorb)];
-        const RadialEval& radial_eval = radial_evals_[orbital.radial_index];
-        const NumericalRadial& radial = *radial_eval.radial;
-        if (r < radial.rgrid(0) || r > radial.rmax())
+        double radial_value;
+        double radial_deriv;
+        if (use_shared)
         {
-            continue;
+            const std::size_t ri =
+                static_cast<std::size_t>(orb_radial_[static_cast<std::size_t>(iorb)]);
+            radial_value = rad_val[ri];     // 0 past the radial's rcut (shared spline zero-pad)
+            radial_deriv = rad_deriv[ri];
         }
-        double radial_value = 0.0;
-        double radial_deriv = 0.0;
-        radial_eval.spline->eval(1, &r, &radial_value, &radial_deriv);
+        else
+        {
+            const RadialEval& radial_eval = radial_evals_[orbital.radial_index];
+            const NumericalRadial& radial = *radial_eval.radial;
+            if (r < radial.rgrid(0) || r > radial.rmax())
+            {
+                continue;
+            }
+            radial_value = 0.0;
+            radial_deriv = 0.0;
+            radial_eval.spline->eval(1, &r, &radial_value, &radial_deriv);
+        }
         const std::size_t idx = static_cast<std::size_t>(ylm_index(orbital.l, orbital.m));
         const double c = m_phase(orbital.m);
         const double Y = ylm[idx];
