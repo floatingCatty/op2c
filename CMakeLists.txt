@@ -80,8 +80,15 @@ message(STATUS "set nao_path as ${NAO_PATH}")
 # find_package(MKL CONFIG REQUIRED)
 
 # add math_libs
-
-if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+#
+# Run the BLAS/LAPACK/FFTW/OpenMP detection (which creates the BLAS::BLAS / LAPACK::LAPACK /
+# FFTW::FFTW IMPORTED targets the nao_* libs and the _op2c binding link against) when building
+# standalone OR when a parent project requests the Python bindings as a subproject
+# (``-DOP2C_BUILD_PYTHON=ON``, set by rescu++'s CMake for the single-wheel build). Without this the
+# subproject build leaves those targets undefined and _op2c fails to link. find_package(BLAS/LAPACK)
+# is idempotent and the FFTW import is guarded by ``if(NOT TARGET FFTW::FFTW)``, so this is safe even
+# when the parent already found the same libraries.
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR OP2C_BUILD_PYTHON)
     # Options
     option(USE_OPENMP "Use OpenMP" ON)
     set(BLAS_BACKEND "Auto" CACHE STRING "BLAS Backend (Auto, MKL, OpenBLAS, Generic)")
