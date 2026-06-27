@@ -52,7 +52,12 @@ matvar_t* struct_field(const matvar_t* structure,
     {
         throw std::runtime_error(owner + " is not a MAT struct");
     }
-    matvar_t* field = Mat_VarGetStructFieldByName(structure, field_name, index);
+    // const_cast: Mat_VarGetStructFieldByName is a read-only accessor (returns an internal
+    // field pointer without mutating the parent struct). matio only made its first parameter
+    // ``const matvar_t*`` in newer releases (>=1.5.28); older matio (e.g. 1.5.26) declares it
+    // ``matvar_t*``. Casting away const here binds to BOTH signatures, so op2c builds against
+    // whatever matio the toolchain provides instead of requiring >=1.5.30.
+    matvar_t* field = Mat_VarGetStructFieldByName(const_cast<matvar_t*>(structure), field_name, index);
     if (field == nullptr)
     {
         throw std::runtime_error(owner + " is missing field '" + std::string(field_name) + "'");
@@ -66,7 +71,7 @@ matvar_t* optional_struct_field(const matvar_t* structure, const char* field_nam
     {
         return nullptr;
     }
-    return Mat_VarGetStructFieldByName(structure, field_name, index);
+    return Mat_VarGetStructFieldByName(const_cast<matvar_t*>(structure), field_name, index);
 }
 
 template <class T>
