@@ -50,6 +50,10 @@ int Pseudopot_upf::init_pseudo_reader(const std::string &fn, std::string &type, 
 	{
 		info = read_pseudo_upf201(ifs, pp);
 	}
+	else if (type == "psml")
+	{
+		info = read_pseudo_psml(ifs, pp);
+	}
 	else if (type == "blps")
 	{
 		// info = read_pseudo_blps(ifs, pp);
@@ -77,6 +81,24 @@ int Pseudopot_upf::set_pseudo_type(const std::string &fn, std::string &type) //z
 	if (pptype_ifs.good())
 	{
 		getline(pptype_ifs,dummy);
+
+		// PSML files open with an XML declaration (<?xml ...?>) then <psml ...>;
+		// scan the first few lines so the optional declaration is skipped.
+		{
+			std::string probe = dummy;
+			for (int k = 0; k < 4 && probe.find("<psml") == std::string::npos
+			                && probe.find('<') != std::string::npos; ++k)
+			{
+				std::string nxt;
+				if (!getline(pptype_ifs, nxt)) break;
+				probe += nxt;
+			}
+			if ( probe.find("<psml") != std::string::npos )
+			{
+				type = "psml";
+				return 0;
+			}
+		}
 
 		std::stringstream wdsstream(dummy);
 		getline(wdsstream,strversion,'"');

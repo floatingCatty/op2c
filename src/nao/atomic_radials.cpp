@@ -15,6 +15,10 @@
 #include <numeric>
 #include <algorithm>
 #include <utility>
+#include <sstream>
+#include <cmath>
+#include <cctype>
+#include <vector>
 
 namespace
 {
@@ -103,6 +107,18 @@ void AtomicRadials::build(const std::string& file, const int itype, const int p,
         read_rescumat_mat(file, p, pm, ptr_logger, comm);
         set_rcut_max();
         return;
+    }
+
+    {
+        std::string lowered = file;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (lowered.size() >= 4 && lowered.substr(lowered.size() - 4) == ".ion")
+        {
+            read_siesta_ion(file, p, pm, ptr_logger, comm);
+            set_rcut_max();
+            return;
+        }
     }
 
     std::ifstream ifs;
@@ -246,6 +262,237 @@ void AtomicRadials::read_rescumat_mat(const std::string& file,
             false
         );
         chi_[index(l, izeta)].normalize();
+    }
+}
+
+void AtomicRadials::read_siesta_ion(const std::string& file,
+                                    const int p,
+                                    const int pm,
+                                    const ModuleBase::Logger* ptr_logger,
+                                    MPI_Comm comm)
+{
+    int rank = 0;
+#ifdef __MPI
+    MPI_Comm_rank(comm, &rank);
+#endif
+
+    if (ptr_logger)
+    {
+        ptr_logger->info() << "\n\n\n\n";
+        ptr_logger->info() << " >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" << std::endl;
+        ptr_logger->info() << " |               SETUP SIESTA .ion PAO ORBITALS                    |" << std::endl;
+        ptr_logger->info() << " <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" << std::endl;
+        ptr_logger->info() << "\n\n\n\n";
+    }
+
+    // Per-orbital parsed data (rank 0 fills, then broadcasts). chi = f(r) * r^l is
+    // the true radial function (SIESTA .ion stores the reduced f with chi = f*r^l,
+    // normalized int chi^2 r^2 dr = 1 — same convention as ABACUS .orb stores chi).
+    std::string symbol;
+    std::vector<int> orb_l;                     // physical angular momentum per orbital
+    std::vector<std::vector<double>> orb_r;     // native (uniform) r grid per orbital
+    std::vector<std::vector<double>> orb_chi;   // chi(r) = f(r) * r^l per orbital
+
+    if (rank == 0)
+    {
+        std::ifstream ifs(file);
+        if (!ifs)
+        {
+            throw std::runtime_error("AtomicRadials::read_siesta_ion: cannot open " + file);
+        }
+        std::string line;
+        bool in_paos = false;
+        while (std::getline(ifs, line))
+        {
+            // Element symbol: the "<Sym>   # Symbol" line in the .ion header.
+            if (symbol.empty() && line.find("# Symbol") != std::string::npos)
+            {
+                std::istringstream iss(line);
+                iss >> symbol;
+            }
+            if (line.find("# PAOs") != std::string::npos)
+            {
+                in_paos = true;
+                continue;
+            }
+            if (!in_paos)
+            {
+                continue;
+            }
+            // A PAO header is "l n z is_polarized population"; the PAO section ends at
+            // the next "#"-prefixed marker (e.g. "# KBs:") or a non-conforming line.
+            {
+                std::string trimmed = line;
+                std::size_t first = trimmed.find_first_not_of(" \t");
+                if (first == std::string::npos || trimmed[first] == '#')
+                {
+                    break;
+                }
+            }
+            int l = 0, n = 0, z = 0, ispol = 0;
+            double pop = 0.0;
+            {
+                std::istringstream iss(line);
+                if (!(iss >> l >> n >> z >> ispol >> pop))
+                {
+                    break; // not a PAO header -> end of PAO section
+                }
+            }
+            // "npts  delta  cutoff"
+            int npts = 0;
+            double delta = 0.0, cutoff = 0.0;
+            if (!std::getline(ifs, line))
+            {
+                throw std::runtime_error("read_siesta_ion: truncated PAO header in " + file);
+            }
+            {
+                std::istringstream iss(line);
+                iss >> npts >> delta >> cutoff;
+            }
+            if (npts < 2)
+            {
+                throw std::runtime_error("read_siesta_ion: bad npts in " + file);
+            }
+            std::vector<double> rg(npts), chi(npts);
+            for (int i = 0; i < npts; ++i)
+            {
+                if (!std::getline(ifs, line))
+                {
+                    throw std::runtime_error("read_siesta_ion: truncated PAO data in " + file);
+                }
+                std::istringstream iss(line);
+                double rr = 0.0, ff = 0.0;
+                iss >> rr >> ff;
+                rg[i] = rr;
+                chi[i] = ff * std::pow(rr, l); // f(r) * r^l = chi(r)
+            }
+            orb_l.push_back(l);
+            orb_r.push_back(std::move(rg));
+            orb_chi.push_back(std::move(chi));
+        }
+        if (orb_l.empty())
+        {
+            throw std::runtime_error("read_siesta_ion: no PAO orbitals found in " + file);
+        }
+    }
+
+    int n_orb = static_cast<int>(orb_l.size());
+#ifdef __MPI
+    Parallel_Common::bcast_string(symbol, comm);
+    Parallel_Common::bcast_int(n_orb, comm);
+    if (rank != 0)
+    {
+        orb_l.assign(n_orb, 0);
+        orb_r.assign(n_orb, {});
+        orb_chi.assign(n_orb, {});
+    }
+    for (int i = 0; i < n_orb; ++i)
+    {
+        int ng = (rank == 0) ? static_cast<int>(orb_r[i].size()) : 0;
+        Parallel_Common::bcast_int(orb_l[i], comm);
+        Parallel_Common::bcast_int(ng, comm);
+        if (rank != 0)
+        {
+            orb_r[i].assign(ng, 0.0);
+            orb_chi[i].assign(ng, 0.0);
+        }
+        Parallel_Common::bcast_double(orb_r[i].data(), ng, comm);
+        Parallel_Common::bcast_double(orb_chi[i].data(), ng, comm);
+    }
+#endif
+
+    symbol_ = symbol;
+    orb_ecut_ = 0.0; // SIESTA .ion carries no ABACUS-style energy cutoff (informational only)
+
+    // Apply the angular-momentum shift (pm), dropping any orbital pushed below l=0. The
+    // radial chi is unchanged by the shift (it was computed with the physical l), matching
+    // read_rescumat_mat.
+    std::vector<int> L;
+    std::vector<int> src;
+    L.reserve(n_orb);
+    src.reserve(n_orb);
+    for (int i = 0; i < n_orb; ++i)
+    {
+        int l = orb_l[i] + pm;
+        if (l < 0)
+        {
+            continue;
+        }
+        L.push_back(l);
+        src.push_back(i);
+    }
+    if (L.empty())
+    {
+        throw std::runtime_error("read_siesta_ion: no orbitals left after angular-momentum shift: " + file);
+    }
+
+    lmax_ = -1;
+    lmin_ = 99999;
+    for (int l : L)
+    {
+        lmax_ = std::max(lmax_, l);
+        lmin_ = std::min(lmin_, l);
+    }
+
+    nzeta_ = new int[lmax_ + 1];
+    norb_ = new int[lmax_ + 1];
+    std::fill(nzeta_, nzeta_ + lmax_ + 1, 0);
+    std::fill(norb_, norb_ + lmax_ + 1, 0);
+    for (int l : L)
+    {
+        nzeta_[l] += 1;
+    }
+
+    nchi_ = 0;
+    nphi_ = 0;
+    nzeta_max_ = 0;
+    for (int l = 0; l <= lmax_; ++l)
+    {
+        nchi_ += nzeta_[l];
+        norb_[l] = nzeta_[l] * (2 * l + 1);
+        nphi_ += norb_[l];
+        nzeta_max_ = std::max(nzeta_max_, nzeta_[l]);
+    }
+    indexing();
+
+    // Common uniform grid for ALL orbitals (r0=0, dr=0.01, cutoff = max orbital cutoff
+    // rounded up to a dr multiple). The shared uniform grid is required for the fast paths:
+    // the FFT-based SBT in the two-center tables and the O(1)-index orbital evaluator
+    // (orbital_evaluator.cpp). set_uniform_grid resamples each native PAO onto it via op2c's
+    // own cubic spline (the same operation the bundle does for .orb).
+    const double table_dr = 0.01;
+    double max_cut = 0.0;
+    for (int i : src)
+    {
+        if (!orb_r[i].empty())
+        {
+            max_cut = std::max(max_cut, orb_r[i].back());
+        }
+    }
+    const int common_nr = static_cast<int>(std::ceil(max_cut / table_dr)) + 1;
+    const double common_cut = (common_nr - 1) * table_dr;
+
+    chi_ = new NumericalRadial[nchi_];
+    std::vector<int> next_zeta(lmax_ + 1, 0);
+    for (std::size_t k = 0; k < L.size(); ++k)
+    {
+        const int l = L[k];
+        const int i = src[k];
+        const int izeta = next_zeta[l]++;
+        const int idx = index(l, izeta);
+        chi_[idx].build(l,
+                        true,
+                        static_cast<int>(orb_r[i].size()),
+                        orb_r[i].data(),
+                        orb_chi[i].data(),
+                        p,
+                        izeta,
+                        symbol_,
+                        itype_,
+                        false);
+        // Normalize onto the shared uniform grid (cubic-spline interpolation, zero-padded
+        // beyond each orbital's own cutoff).
+        chi_[idx].set_uniform_grid(true, common_nr, common_cut, 'i', false);
     }
 }
 

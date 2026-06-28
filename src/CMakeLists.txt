@@ -87,6 +87,7 @@ add_library(nao_pseudo
     pseudopotential/io/read_pp_upf100.cpp
     pseudopotential/io/read_pp_upf201.cpp
     pseudopotential/io/read_pp_vwr.cpp
+    pseudopotential/io/read_pp_psml.cpp
     pseudopotential/io/read_pseudo.cpp
 )
 target_link_libraries(nao_pseudo PUBLIC nao_core)

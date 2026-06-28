@@ -66,6 +66,14 @@ class AtomicRadials : public RadialSet
                            const ModuleBase::Logger* ptr_logger = nullptr,
                            MPI_Comm comm = MPI_COMM_WORLD);
 
+    //! Read a SIESTA <El>.ion basis file (the PAO blocks only; KB/Vna ignored —
+    //! the pseudopotential is supplied separately by the UPF/PSML reader).
+    void read_siesta_ion(const std::string& file,
+                         const int p = 0,
+                         const int pm = 0,
+                         const ModuleBase::Logger* ptr_logger = nullptr,
+                         MPI_Comm comm = MPI_COMM_WORLD);
+
 };
 
 #endif

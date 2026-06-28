@@ -84,6 +84,7 @@ public:
     int read_pseudo_upf(std::ifstream& ifs, Atom_pseudo& pp);
     int read_pseudo_vwr(std::ifstream& ifs, Atom_pseudo& pp);
     int read_pseudo_blps(std::ifstream& ifs, Atom_pseudo& pp); // sunliang added 2021.07.08
+    int read_pseudo_psml(std::ifstream& ifs, Atom_pseudo& pp); // PSML (SIESTA/PseudoDojo) reader
     void read_pseudo_header(std::ifstream& ifs, Atom_pseudo& pp);
     void read_pseudo_mesh(std::ifstream& ifs, Atom_pseudo& pp);
     void read_pseudo_nlcc(std::ifstream& ifs, Atom_pseudo& pp);
