@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <numeric>
+#include <stdexcept>
 
 #include "math/constants.h"
 #include "math/interpolation/cubic_spline.h"
@@ -309,6 +310,50 @@ void NumericalRadial::transform(const bool forward)
         }
         else
         {
+            // Native-mesh ingestion point: `direct` integrates f(r) j_l(kr) by (generalized)
+            // Simpson on rgrid_. On a coarse mesh region (log meshes: dr grows to ~1.5 Bohr in
+            // the tail) j_l(kr) is unresolved once k*dr approaches pi (two samples per
+            // oscillation) and the transform is SILENTLY wrong. Guard over the support of
+            // rvalue_ only — trailing zeros carry no weight, and truncating a radial to its
+            // compact support (as beta projectors are) is exactly what makes log meshes safe.
+            // The k->r branch below is deliberately NOT guarded: its input kgrid is always an
+            // op2c-built uniform grid, and the two-center table back-transform legitimately
+            // operates at rmax*dk == pi at the far end of the R table (where the result -> 0).
+            double vmax = 0.0;
+            for (int i = 0; i < nr_; ++i)
+            {
+                vmax = std::max(vmax, std::abs(rvalue_[i]));
+            }
+            if (vmax > 0.0)
+            {
+                int i_last = nr_ - 1;
+                while (i_last > 0 && std::abs(rvalue_[i_last]) <= 1e-14 * vmax)
+                {
+                    --i_last;
+                }
+                // Intervals WITHIN the support only. The interval leaving the last nonzero
+                // point is excluded: for a hard-truncated function its (small) misintegration
+                // is a truncation artifact ~O(|f(i_last)|*h), present at any k — not the
+                // unresolved-oscillation failure this guard polices.
+                double h_max = 0.0;
+                for (int i = 0; i < i_last; ++i)
+                {
+                    h_max = std::max(h_max, rgrid_[i + 1] - rgrid_[i]);
+                }
+                const double kmax = kgrid_[nk_ - 1];
+                if (kmax * h_max >= PI)
+                {
+                    throw std::runtime_error(
+                        "NumericalRadial::transform (r->k, direct/Simpson): radial '" + symbol_
+                        + "' l=" + std::to_string(l_) + " izeta=" + std::to_string(izeta_)
+                        + " is aliased: kmax*max_dr = " + std::to_string(kmax) + " * "
+                        + std::to_string(h_max) + " = " + std::to_string(kmax * h_max)
+                        + " >= pi over the function's support (r <= "
+                        + std::to_string(rgrid_[i_last]) + "). j_l(k*r) is unresolved by the "
+                        "radial mesh there and the transform would be silently wrong. Truncate "
+                        "the radial to its compact support, refine its mesh, or lower the k cutoff.");
+                }
+            }
             sbt_.direct(l_, nr_, rgrid_.data(), rvalue_.data(), nk_, kgrid_.data(), kvalue_.data(), pr_);
         }
         pk_ = 0;

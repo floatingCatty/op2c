@@ -5,11 +5,26 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+
+namespace {
+// ---- Real-spherical-harmonic convention boundary (single source of truth) --------------------
+// op2c's two-center primitives are ALL internally in the `sph_harm` real-harmonic convention:
+// `TwoCenterIntegrator::calculate` builds the displacement harmonics with `Ylm::rl_sph_harm` and
+// couples them with `RealGauntTable` (both `sph_harm`). The rescu++ operators, density matrix and
+// Hamiltonian are in the `get_ylm_real` convention. The two conventions differ ONLY by a per-
+// harmonic sign, Y^{gyr}_{lm} = (-1)^m Z^{sph}_{lm}, so ANY operator matrix element assembled from
+// op2c primitives is converted to the operator convention by multiplying it, exactly ONCE, by
+// (-1)^(m_row + m_col) where m_row, m_col are the two ORBITAL magnetic quantum numbers of that
+// element. Every builder below (overlap, kinetic, position, <phi|beta>) applies this one rule via
+// `ylm_real_phase`.
+inline int ylm_real_phase(int m_row, int m_col) { return ((m_row + m_col) & 1) ? -1 : 1; }
+} // namespace
 
 Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
@@ -55,7 +70,7 @@ Op2c::Op2c(
     std::vector<AtomicRadials> orbitals,
     std::vector<Atom_pseudo> pseudos,
     int nspin, bool lspinorb,
-    bool pm_build, double orb_kcut
+    bool pm_build, double orb_kcut, bool overlap_only
     ):
     comm(0), nspin(nspin), lspinorb(lspinorb),
     psds(std::move(pseudos))
@@ -76,10 +91,10 @@ Op2c::Op2c(
         tcbd.build_beta(ntype, beta_radials.data(), pm_build);
     }
 
-    build_maps();
+    build_maps(overlap_only);
 }
 
-void Op2c::build_maps()
+void Op2c::build_maps(bool overlap_only)
 {
     size_t ntype = tcbd.orb_->ntype();
 
@@ -90,7 +105,7 @@ void Op2c::build_maps()
         tcbd.orb_->band_limit(orb_kcut_);
     }
 
-    tcbd.tabulate();
+    tcbd.tabulate(overlap_only);
 
     // build orbital mapping table: [itype][iorb] -> (l, zeta, m)
     orb_map.resize({(int)ntype, tcbd.orb_->nphi_max(), 3});
@@ -189,7 +204,7 @@ void Op2c::overlap(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, 
             jm = orb_map.get_value<int>(jtype, j, 2);
             tcbd.overlap_orb->calculate(itype, il, izeta, im, jtype, jl, jzeta, jm, Rij, v.data()+shift, grad_out);
             
-            m_phase = (im+jm) % 2 == 0 ? 1 : -1;
+            m_phase = ylm_real_phase(im, jm);
             v.data()[shift] *= m_phase;
             if (grad_out != nullptr) {
                 grad_out[0] *= m_phase;
@@ -259,9 +274,12 @@ void Op2c::kinetic(size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, 
             jl = orb_map.get_value<int>(jtype, j, 0);
             jzeta = orb_map.get_value<int>(jtype, j, 1);
             jm = orb_map.get_value<int>(jtype, j, 2);
+            if (!tcbd.kinetic_orb) {
+                throw std::runtime_error("Op2c::kinetic on an overlap_only engine (no kinetic table)");
+            }
             tcbd.kinetic_orb->calculate(itype, il, izeta, im, jtype, jl, jzeta, jm, Rij, v.data()+shift, grad_out);
 
-            m_phase = (im+jm) % 2 == 0 ? 1 : -1;
+            m_phase = ylm_real_phase(im, jm);
             v.data()[shift] *= m_phase;
             if (grad_out != nullptr) {
                 grad_out[0] *= m_phase;
@@ -328,7 +346,7 @@ void Op2c::overlap_position(
             jm = orb_map.get_value<int>(jtype, j, 2);
             tcbd.overlap_orb->calculate(itype, il, izeta, im, jtype, jl, jzeta, jm, Rj-Ri, Rj, ptr, ptrx, ptry, ptrz);
 
-            m_phase = (im+jm) % 2 == 0 ? 1 : -1;
+            m_phase = ylm_real_phase(im, jm);
             *ptr *= m_phase;
             *ptrx *= m_phase;
             *ptry *= m_phase;
@@ -393,7 +411,7 @@ void Op2c::orb_r_beta(
                     shift = io * knorb + ko;
                 }
 
-                m_phase = (im+km) % 2 == 0 ? 1 : -1;
+                m_phase = ylm_real_phase(im, km);
 
                 if (with_pos) {
                     // ob = <phi|beta>, oxb/oyb/ozb = <phi|r|beta> (position op,
@@ -467,7 +485,7 @@ void Op2c::orb_grad_beta(
                     shift = io * knorb + ko;
                 }
 
-                m_phase = (im+km) % 2 == 0 ? 1 : -1;
+                m_phase = ylm_real_phase(im, km);
 
                 // ob = <phi|beta>, grad = d I / d vR (vR = Rk - Ri) = <grad phi | beta>
                 // (integration by parts). Plain overlap-beta table, no pm_build needed.

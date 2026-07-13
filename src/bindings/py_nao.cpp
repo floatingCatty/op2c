@@ -459,7 +459,8 @@ void bind_two_center_bundle(py::module &m) {
         .def("build_beta", [](TwoCenterBundle& self, std::vector<BetaRadials>& betas, bool pm_build) {
             self.build_beta(betas.size(), betas.data(), pm_build);
         }, py::arg("betas"), py::arg("pm_build") = true)
-        .def("tabulate", (void (TwoCenterBundle::*)()) &TwoCenterBundle::tabulate)
+        .def("tabulate", (void (TwoCenterBundle::*)(bool)) &TwoCenterBundle::tabulate,
+             py::arg("overlap_only") = false)
         .def("tabulate_with_params", (void (TwoCenterBundle::*)(const double, const double, const double, const double)) &TwoCenterBundle::tabulate,
              py::arg("lcao_ecut"), py::arg("lcao_dk"), py::arg("lcao_dr"), py::arg("lcao_rmax"))
         

@@ -123,6 +123,19 @@ void RadialSet::set_rcut_max()
     }
 }
 
+void RadialSet::set_itype(int it)
+{
+    // The two-center table indexes each row by the RADIAL's own itype_ (TwoCenterTable::table_index
+    // reads it1->itype()), while TwoCenterIntegrator::calculate() looks the row up by the POSITION of
+    // the type in the RadialCollection. Both must agree, so reassign itype_ on this set AND on every
+    // chi_ (used e.g. when a screened copy of type t is appended at a new position nt+t). doc 52 Inc 3b.
+    itype_ = it;
+    for (int i = 0; i < nchi_; ++i)
+    {
+        chi_[i].set_itype(it);
+    }
+}
+
 int RadialSet::index(const int l, const int izeta) const
 {
 #ifdef __DEBUG

@@ -207,6 +207,7 @@ public:
     ///@{
     std::string const& symbol() const { return symbol_; }
     int itype() const { return itype_; }
+    void set_itype(int it) { itype_ = it; } ///< reassign the element index (two-center table keys on it)
     int izeta() const { return izeta_; }
     int l() const { return l_; }
     int nr() const { return nr_; } // paired with rmax(), not rcut!

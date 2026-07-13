@@ -5,7 +5,12 @@
 #include "math/ylm.h"
 #include "int2c/gaunt_table.h"
 #include "nao/atomic_radials.h"
+#include "nao/radial_function.h"
+#include "pseudopotential/beta_projectors.h"
+#include <algorithm>
+#include <cmath>
 #include <memory>
+#include <vector>
 
 void TwoCenterBundle::build_orb(int ntype, const std::string* file_orb0, const std::string& orbital_dir, bool pm_build, MPI_Comm comm)
 {
@@ -56,7 +61,7 @@ void TwoCenterBundle::build_orb(int ntype, AtomicRadials* radials, bool pm_build
     }
 }
 
-void TwoCenterBundle::tabulate()
+void TwoCenterBundle::tabulate(bool overlap_only)
 {
     ModuleBase::SphericalBesselTransformer sbt(true);
     orb_->set_transformer(sbt);
@@ -96,9 +101,11 @@ void TwoCenterBundle::tabulate()
     // 'T' tag selects the kinetic integral (op_pk = -2 in table.cpp), matching
     // the documented Operator type codes in integrator.h ('S' overlap,
     // 'T' kinetic, 'R' position).
-    kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
-    kinetic_orb->tabulate(*orb_, *orb_, 'T', table_nr, table_cutoff);
-    ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
+    if (!overlap_only) {
+        kinetic_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
+        kinetic_orb->tabulate(*orb_, *orb_, 'T', table_nr, table_cutoff);
+        ModuleBase::Memory::record("TwoCenterTable: Kinetic", kinetic_orb->table_memory());
+    }
 
     overlap_orb = std::unique_ptr<TwoCenterIntegrator>(new TwoCenterIntegrator(gaunt_table_));
     if (orbp_) {
@@ -218,7 +225,7 @@ void TwoCenterBundle::build_beta(int ntype, BetaRadials* nl, bool pm_build)
 {
     beta_ = std::unique_ptr<RadialCollection>(new RadialCollection);
     beta_->build(ntype, nl);
-    
+
     if (pm_build) {
         betap_ = std::unique_ptr<RadialCollection>(new RadialCollection);
         betam_ = std::unique_ptr<RadialCollection>(new RadialCollection);

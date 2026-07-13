@@ -5,8 +5,11 @@
 #include "int2c/integrator.h"
 #include "int2c/gaunt_table.h"
 
+#include <array>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 class AtomicRadials;
 
@@ -23,7 +26,9 @@ class TwoCenterBundle
     // void build_beta(int ntype, Numerical_Nonlocal* nl);
     void build_beta(int ntype, BetaRadials* nl, bool pm_bool);
 
-    void tabulate();
+    // overlap_only: skip the kinetic table — for pure-overlap engines (e.g. the
+    // moment-split dV-screened engine) the kinetic tabulation is dead cost.
+    void tabulate(bool overlap_only = false);
 
     // Unlike the tabulate() above, this overload function computes
     // two-center integration table by direct integration with Simpson's

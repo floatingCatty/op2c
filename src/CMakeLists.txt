@@ -37,6 +37,8 @@ add_library(nao_math
     math/ylm.cpp
     math/math_sphbes.cpp
     math/math_integral.cpp
+    math/math_lebedev_laikov.cpp
+    math/atomic_grid.cpp
     math/linalg/complexmatrix.cpp
     math/linalg/complexarray.cpp
     math/linalg/matrix.cpp

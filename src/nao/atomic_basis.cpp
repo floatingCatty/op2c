@@ -221,6 +221,12 @@ void RadialCollection::build(const int ntype, AtomicRadials* const nls)
     for (int itype = 0; itype < ntype_; ++itype)
     {
         radset_[itype].reset(nls[itype].clone());
+        // The two-center table indexes each row by the radial's own itype_ (TwoCenterTable::table_index
+        // reads it->itype()), while TwoCenterIntegrator::calculate() looks the row up by the type's
+        // POSITION in this collection. They MUST agree, so pin itype_ to the position here — otherwise
+        // an incoming set whose itype_ != position (e.g. a dV-screened copy of type t appended at
+        // position ntype+t) yields an unindexed (-1) row and calculate() reads out of bounds. doc 52.
+        radset_[itype]->set_itype(itype);
 
         lmax_ = std::max(lmax_, radset_[itype]->lmax());
         nchi_ += radset_[itype]->nchi();

@@ -19,6 +19,7 @@
 #include "pseudopotential/io/read_pseudo.h"
 #include "utils/container/ATen/tensor.h"
 #include "nao/atomic_radials.h"
+#include <memory>
 #include <vector>
 #include <complex>
 #ifdef __MPI
@@ -55,7 +56,7 @@ private:
     bool lspinorb;
 
     /// Shared init: tabulate + build orb_map/beta_map
-    void build_maps();
+    void build_maps(bool overlap_only = false);
 
     /// Reciprocal-space cutoff (1/Bohr) for Soler-Anglada orbital band-limiting,
     /// applied to tcbd.orb_ in build_maps() before tabulate(); <= 0 disables it.
@@ -98,7 +99,8 @@ public:
         std::vector<Atom_pseudo> pseudos,
         int nspin, bool lspinorb,
         bool pm_build = true,
-        double orb_kcut = 0.0
+        double orb_kcut = 0.0,
+        bool overlap_only = false  // skip the kinetic table (pure-overlap engines)
     );
 
     ~Op2c() = default;

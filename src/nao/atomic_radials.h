@@ -45,6 +45,14 @@ class AtomicRadials : public RadialSet
 
     void build(const RadialSet* const other, const int itype, const int p = 0, const int pm = 0, const double rcut = -1.0) override;
 
+    //! Multiply every radial in place by a spherical function w(r), turning each orbital phi_i
+    //! into (w . phi_i) with the SAME (l, izeta). Used to build the "screened orbital" R_i.dV for
+    //! the two-centre neutral-atom-potential-residual integral <phi_i|dV|phi_j> = <(dV.phi_i)|phi_j>
+    //! (moment-cancelling Vna, doc 52 Inc 3b). ``w`` is tabulated on ``(w_r, w_v)`` (linear interp,
+    //! 0 outside its range); a compact ``w`` (e.g. dV, support < r_delta) makes the screened radial
+    //! compact so the overlap support shrinks accordingly.
+    void screen_by_radial(const double* w_r, const double* w_v, int w_n);
+
     //! Get the energy cutoff as given by the orbital file
     double orb_ecut() const { return orb_ecut_; }
 

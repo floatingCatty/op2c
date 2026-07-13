@@ -448,3 +448,73 @@ void OrbitalEvaluator::evaluate_all_grad(int npoint, const double* xyz,
                             all.data(), nphi_, vrow, grow);
     }
 }
+
+namespace {
+// Linear interpolation of a radial table (ascending @p xr) at @p x; 0 outside [xr.front, xr.back].
+double interp_radial(const std::vector<double>& xr, const std::vector<double>& yv, double x)
+{
+    const int n = static_cast<int>(xr.size());
+    if (n == 0 || x <= xr.front()) return n ? yv.front() : 0.0;
+    if (x >= xr.back()) return 0.0;
+    int lo = 0, hi = n - 1;                       // binary search for the bracketing knot
+    while (hi - lo > 1)
+    {
+        const int mid = (lo + hi) / 2;
+        if (xr[mid] <= x) lo = mid; else hi = mid;
+    }
+    const double t = (x - xr[lo]) / (xr[hi] - xr[lo]);
+    return yv[lo] + t * (yv[hi] - yv[lo]);
+}
+}  // namespace
+
+std::vector<double> OrbitalEvaluator::onsite_potential_matrix(
+    const std::vector<double>& vna_r, const std::vector<double>& vna_v) const
+{
+    std::vector<double> H(static_cast<std::size_t>(nphi_) * nphi_, 0.0);
+    const int nr_v = static_cast<int>(vna_r.size());
+    if (nr_v < 2 || nphi_ == 0) return H;
+
+    // Domain [0, r_hi] where BOTH the orbitals and V_na have support.
+    double vna_rcut = 0.0;
+    for (int i = nr_v - 1; i >= 0; --i)
+        if (std::fabs(vna_v[i]) > 1e-12) { vna_rcut = vna_r[i]; break; }
+    const double r_hi = std::min(rcut_max_, vna_rcut);
+    if (r_hi <= 0.0) return H;
+
+    // Dense midpoint radial quadrature — R_i R_j V_na r^2 is smooth (pseudo-NAOs + smooth V_na),
+    // so this converges to machine well below the grid's accuracy.
+    const int nq = 4000;
+    const double dr = r_hi / nq;
+    std::vector<double> rq(nq), Vq(nq), fac(nq);
+    for (int q = 0; q < nq; ++q)
+    {
+        const double r = (q + 0.5) * dr;
+        rq[q] = r;
+        Vq[q] = interp_radial(vna_r, vna_v, r);
+        fac[q] = dr * r * r;                       // midpoint weight * r^2
+    }
+
+    // R_radial(r_q) for each distinct radial (batched cubic-spline eval).
+    const int nrad = static_cast<int>(radial_evals_.size());
+    std::vector<std::vector<double>> Rq(static_cast<std::size_t>(nrad), std::vector<double>(nq));
+    for (int ri = 0; ri < nrad; ++ri)
+        radial_evals_[static_cast<std::size_t>(ri)].spline->eval(nq, rq.data(),
+                                                                 Rq[static_cast<std::size_t>(ri)].data());
+
+    // H_ij = [l_i==l_j && m_i==m_j] * sum_q fac_q R_i(r_q) R_j(r_q) V_na(r_q).
+    for (int i = 0; i < nphi_; ++i)
+    {
+        const OrbitalEntry& oi = orbitals_[static_cast<std::size_t>(i)];
+        const double* Ri = Rq[oi.radial_index].data();
+        for (int j = 0; j < nphi_; ++j)
+        {
+            const OrbitalEntry& oj = orbitals_[static_cast<std::size_t>(j)];
+            if (oi.l != oj.l || oi.m != oj.m) continue;
+            const double* Rj = Rq[oj.radial_index].data();
+            double s = 0.0;
+            for (int q = 0; q < nq; ++q) s += fac[q] * Ri[q] * Rj[q] * Vq[q];
+            H[static_cast<std::size_t>(i) * nphi_ + j] = s;
+        }
+    }
+    return H;
+}

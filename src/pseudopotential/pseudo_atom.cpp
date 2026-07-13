@@ -4,6 +4,9 @@
 #include <algorithm>
 #include "utils/parallel_common.h"
 #include <cassert>
+#include <cmath>
+#include <stdexcept>
+#include <vector>
 // #include "source_io/module_parameter/parameter.h"
 
 Atom_pseudo::Atom_pseudo()
@@ -275,6 +278,7 @@ void Atom_pseudo::setup_nonlocal(const ModuleBase::Logger& logger, const bool ls
 
     delete[] tmpBeta_lm_new;
 }
+
 #ifdef __MPI
 
 namespace

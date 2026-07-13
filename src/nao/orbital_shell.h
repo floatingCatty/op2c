@@ -120,6 +120,7 @@ class RadialSet
     ///@{
     const std::string& symbol() const { return symbol_; }
     int itype() const { return itype_; }
+    void set_itype(int it); ///< reassign this set's element index AND every chi_ (two-center table keys on it)
     int lmax() const { return lmax_; }
     int lmin() const { return lmin_; }
     double rcut_max() const { return rcut_max_; }

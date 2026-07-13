@@ -1,6 +1,7 @@
 #include "nao/atomic_radials.h"
 
 #include "io/rescumat_mat.h"
+#include "math/interpolation/cubic_spline.h"
 #include "math/math_integral.h"
 
 // FIXME: should update with pyabacus
@@ -570,6 +571,55 @@ void AtomicRadials::build(const RadialSet* const other, const int itype, const i
         this->norb_[l] = this->nzeta_[l] * (2*l+1);
         this->nphi_ += this->norb_[l];
     }
+}
+
+void AtomicRadials::screen_by_radial(const double* w_r, const double* w_v, int w_n)
+{
+    if (chi_ == nullptr || nchi_ <= 0 || w_n <= 0) return;
+    // Cubic-spline interpolation of the spherical multiplier w on (w_r, w_v): flat below the
+    // first knot, and ZERO past the last (a compact residual dV vanishes beyond its support, so
+    // the screened radial is compact and NumericalRadial's trailing-zero detection shrinks its
+    // rcut). Cubic, NOT linear: with linear interp the accuracy of the screened radial hinged on
+    // an unenforced contract that the caller ships w on a much finer knot grid than the orbital
+    // grid sampled here (doc 52's moment guard certifies dV on ITS OWN grid only — a coarse w
+    // grid through linear interp would silently degrade the H_dV table, the same failure mode as
+    // doc 52 item-2). Cubic matches every other resample in this codebase and removes the
+    // contract. CubicSpline::build handles w_n >= 2 (n==2/3 degenerate cases built in).
+    std::vector<double> w_dy;
+    if (w_n >= 2)
+    {
+        w_dy.resize(static_cast<size_t>(w_n));
+        ModuleBase::CubicSpline::build(w_n, w_r, w_v, {}, {}, w_dy.data());
+    }
+    for (int ic = 0; ic < nchi_; ++ic)
+    {
+        NumericalRadial& nr = chi_[ic];
+        const int ngrid = nr.nr();
+        const double* rgrid = nr.rgrid();
+        const double* rvalue = nr.rvalue();
+        std::vector<double> screened(static_cast<size_t>(ngrid));
+        // Partition the (ascending) orbital grid: [flat below w_r[0] | spline inside | zero
+        // beyond w_r[w_n-1]] — CubicSpline::eval requires query points within the knot range.
+        const int ir_lo = static_cast<int>(std::lower_bound(rgrid, rgrid + ngrid, w_r[0]) - rgrid);
+        const int ir_hi = static_cast<int>(std::upper_bound(rgrid, rgrid + ngrid, w_r[w_n - 1]) - rgrid);
+        for (int ir = 0; ir < ir_lo; ++ir)
+            screened[static_cast<size_t>(ir)] = rvalue[ir] * w_v[0];
+        if (w_n >= 2 && ir_hi > ir_lo)
+        {
+            std::vector<double> w_mid(static_cast<size_t>(ir_hi - ir_lo));
+            ModuleBase::CubicSpline::eval(w_n, w_r, w_v, w_dy.data(), ir_hi - ir_lo, rgrid + ir_lo,
+                                          w_mid.data(), nullptr, nullptr);
+            for (int ir = ir_lo; ir < ir_hi; ++ir)
+                screened[static_cast<size_t>(ir)] = rvalue[ir] * w_mid[static_cast<size_t>(ir - ir_lo)];
+        }
+        std::fill(screened.begin() + ir_hi, screened.end(), 0.0);
+        // Update the r-space values IN PLACE and REGENERATE k-space: set_value memcpys the screened
+        // R_i·w(r) into rvalue_, then transform(true) (r->k) via the already-valid grid + SBT copied
+        // from the normal orbital. (A bare build(..., init_sbt=false) leaves the r-values set but the
+        // k-space stale/empty; the two-centre overlap engine works in k-space. doc 52 Inc 3b.)
+        nr.set_value(true, screened.data(), 0);
+    }
+    set_rcut_max();
 }
 
 void AtomicRadials::read_abacus_orb(std::ifstream& ifs, const int p, const int pm, const ModuleBase::Logger* ptr_logger, MPI_Comm comm)

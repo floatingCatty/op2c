@@ -93,6 +93,21 @@ class OrbitalEvaluator
     void evaluate_all_grad(int npoint, const double* xyz,
                            double* values, double* grad) const;
 
+    /*!
+     * @brief EXACT on-site neutral-atom-potential block <phi_i | V_na | phi_j>, both orbitals
+     *        AND the spherical potential centered on THIS atom (doc 50 §4.3, the analytic on-site
+     *        split). Because V_na is l=0, the angular integral is delta_{l_i,l_j} delta_{m_i,m_j}
+     *        and only a 1-D radial integral remains:
+     *            H_ij = delta_{l_i l_j} delta_{m_i m_j} \int_0^rcut R_i(r) R_j(r) V_na(r) r^2 dr.
+     *        Exact (no angular quadrature error) and GEOMETRY-INDEPENDENT — computed once per element
+     *        and added to the (K,K,R=0) block, replacing the sharpest term on the atom grid.
+     *
+     * @p vna_r / @p vna_v are the neutral-atom potential radial (Hartree), ascending in r.
+     * @return nphi() x nphi() row-major block (zero off the (l,m)-diagonal).
+     */
+    std::vector<double> onsite_potential_matrix(const std::vector<double>& vna_r,
+                                                const std::vector<double>& vna_v) const;
+
   private:
     struct RadialEval
     {
