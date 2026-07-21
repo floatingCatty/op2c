@@ -83,7 +83,8 @@ public:
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
         MPI_Comm comm, const std::string& log_file,
         bool pm_build = true,
-        double orb_kcut = 0.0
+        double orb_kcut = 0.0,
+        bool overlap_only = false  // skip the kinetic table (pure-overlap engines)
     );
 
     /*!

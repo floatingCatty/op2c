@@ -28,7 +28,8 @@ inline int ylm_real_phase(int m_row, int m_col) { return ((m_row + m_col) & 1) ?
 
 Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         const std::string& orb_dir, const std::vector<std::string> orb_name, const std::string& psd_dir, const std::vector<std::string> psd_name,
-        MPI_Comm comm, const std::string& log_file, bool pm_build, double orb_kcut
+        MPI_Comm comm, const std::string& log_file, bool pm_build, double orb_kcut,
+        bool overlap_only
         ):
         comm(comm), nspin(nspin), lspinorb(lspinorb)
 {
@@ -63,7 +64,7 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
         tcbd.build_beta(ntype, beta_radials.data(), pm_build);
     }
 
-    build_maps();
+    build_maps(overlap_only);
 };
 
 Op2c::Op2c(
