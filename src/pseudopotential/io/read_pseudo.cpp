@@ -455,14 +455,20 @@ void read_atom_pseudopots(const std::string& pp_dir, const std::string& pp_name,
         {
             upf.complete_default(atom_pseudo, rcut);
         }
-        std::cout << "Pseudopotential file" << " " << pp_address << std::endl;
-        std::cout << "Pseudopotential type" << " " << (read_rescumat_mat ? "mat" : pp_type) << std::endl;
-        std::cout << "Exchange-correlation functional" << " " << atom_pseudo.xc_func << std::endl;
-        std::cout << "Nonlocal core correction" << " " << atom_pseudo.xc_func << std::endl;
-        std::cout << "Valence electrons" << " " << atom_pseudo.zv << std::endl;
-        std::cout << "Lmax" << " " << atom_pseudo.lmax << std::endl;
-        std::cout << "Number of zeta" << " " << atom_pseudo.nchi << std::endl;
-        std::cout << "Number of projectors" << " " << atom_pseudo.nbeta << std::endl;
+        // Through the logger, not std::cout: a library printing to the
+        // caller's console on every init is the caller's console to give.
+        logger.info() << " Pseudopotential file " << pp_address << std::endl;
+        logger.info() << " Pseudopotential type " << (read_rescumat_mat ? "mat" : pp_type) << std::endl;
+        logger.info() << " Exchange-correlation functional " << atom_pseudo.xc_func << std::endl;
+        logger.info() << " Nonlocal core correction " << atom_pseudo.xc_func << std::endl;
+        logger.info() << " Valence electrons " << atom_pseudo.zv << std::endl;
+        logger.info() << " Lmax " << atom_pseudo.lmax << std::endl;
+        logger.info() << " Number of zeta " << atom_pseudo.nchi << std::endl;
+        logger.info() << " Number of projectors " << atom_pseudo.nbeta << std::endl;
+        if (atom_pseudo.betar_clamped)
+        {
+            logger.warn() << " WARNING: denormal betar values (< 1e-30) were reset to zero" << std::endl;
+        }
         
         // std::cout << "Valence electrons" << " " << atom.ncpp.zv << std::endl;
         

@@ -93,6 +93,11 @@ class pseudo
      */
     void check_betar();
 
+    // Set by check_betar() when denormal betar values were reset to zero.
+    // Reported by the reader through its Logger; check_betar itself has no
+    // logger in scope, which is why this is a flag and not a print.
+    bool betar_clamped = false;
+
     // void print_pseudo_h(std::ofstream& ofs);
     // void print_pseudo_atom(std::ofstream& ofs);
     // void print_pseudo_vl(std::ofstream& ofs);
