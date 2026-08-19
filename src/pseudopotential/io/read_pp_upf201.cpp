@@ -109,7 +109,8 @@ int Pseudopot_upf::read_pseudo_upf201(std::ifstream &ifs, Atom_pseudo& pp)
     return 0;
 }
 
-void Pseudopot_upf::getnameval(std::ifstream& ifs, int& n, std::string* name, std::string* val)
+void Pseudopot_upf::getnameval(std::ifstream& ifs, int& n, std::string* name, std::string* val,
+                               bool* self_closing)
 {
     std::string txt;
     std::string word;
@@ -124,6 +125,14 @@ void Pseudopot_upf::getnameval(std::ifstream& ifs, int& n, std::string* name, st
         {
             break;
         }
+    }
+
+    // Did the tag close itself ("... jjj=\"0.5\"/>" or "... jjj=\"0.5\" />") rather than end
+    // with a plain ">"? Then the whole element is already consumed and there is NO
+    // "</TAG>" left in the stream. Checking the accumulated txt covers both spellings.
+    if (self_closing != nullptr)
+    {
+        *self_closing = (txt.length() >= 2 && txt.compare(txt.length() - 2, 2, "/>") == 0);
     }
 
     // count number of parameters according to "="
@@ -865,11 +874,25 @@ void Pseudopot_upf::read_pseudo_upf201_so(std::ifstream& ifs, Atom_pseudo& pp)
     pp.jjj = std::vector<double>(pp.nbeta, 0.0);
     pp.nn = std::vector<int>(pp.nchi, 0);
 
+    // NOTE on tag forms: the relativistic sub-tags come in BOTH spellings in the wild.
+    // Older/hand-written files write an open/close pair
+    //     <PP_RELBETA.1 index="1" lll="0" jjj="0.5"> ... </PP_RELBETA.1>
+    // while every PseudoDojo ONCV fully-relativistic table (and the QE/ABACUS reference
+    // files) writes the element SELF-CLOSING, with no separate end tag:
+    //     <PP_RELBETA.1  index="1"  lll="0" jjj="0.5"/>
+    // This routine used to demand the closing tag unconditionally, so it threw
+    // "In SCAN_END, can't find: </PP_RELBETA.1> block." on every self-closing file --
+    // i.e. on every FR pseudopotential we actually ship. Note that simply downgrading
+    // SCAN_END to a warning is NOT a fix: it consumes a token either way, so it would eat
+    // the NEXT element's opening tag and desynchronise the parse. ``getnameval`` reports
+    // which form it saw, and the end tag is consumed only when there is one.
+    bool self_closing = false;
+
     for (int nw = 0; nw < pp.nchi; nw++)
     {
         word = "<PP_RELWFC." + std::to_string(nw + 1);
         SCAN_BEGIN(ifs, word);
-        this->getnameval(ifs, nparameter, name, val);
+        this->getnameval(ifs, nparameter, name, val, &self_closing);
         for (int ip = 0; ip < nparameter; ++ip)
         {
             if (name[ip] == "index")
@@ -903,15 +926,18 @@ void Pseudopot_upf::read_pseudo_upf201_so(std::ifstream& ifs, Atom_pseudo& pp)
                 // ModuleBase::WARNING("PP_RELWFC reading", warningstr);
             }
         }
-        word = "</PP_RELWFC." + std::to_string(nw + 1) + ">";
-        SCAN_END(ifs, word);
+        if (!self_closing)
+        {
+            word = "</PP_RELWFC." + std::to_string(nw + 1) + ">";
+            SCAN_END(ifs, word);
+        }
     }
 
     for (int nb = 0; nb < pp.nbeta; nb++)
     {
         word = "<PP_RELBETA." + std::to_string(nb + 1);
         SCAN_BEGIN(ifs, word);
-        this->getnameval(ifs, nparameter, name, val);
+        this->getnameval(ifs, nparameter, name, val, &self_closing);
         for (int ip = 0; ip < nparameter; ++ip)
         {
             if (name[ip] == "index")
@@ -933,8 +959,18 @@ void Pseudopot_upf::read_pseudo_upf201_so(std::ifstream& ifs, Atom_pseudo& pp)
                 // ModuleBase::WARNING("PP_RELBETA reading", warningstr);
             }
         }
-        word = "</PP_RELBETA." + std::to_string(nb + 1) + ">";
-        SCAN_END(ifs, word);
+        if (!self_closing)
+        {
+            word = "</PP_RELBETA." + std::to_string(nb + 1) + ">";
+            SCAN_END(ifs, word);
+        }
     }
-    SCAN_END(ifs, "</PP_SPIN_ORB>");
+    // Sanity check only, and deliberately non-fatal (like "</UPF>" above). Each sub-tag is
+    // located by SCAN_BEGIN, which REWINDS to the start of the file and searches, so the
+    // stream is not left at the end of the block in any position-dependent way: the RELWFC
+    // and RELBETA elements interleave in whichever order the writer chose (PseudoDojo's
+    // dojo_soc files put RELBETA first, then RELWFC), and after the last RELBETA the next
+    // token is then a RELWFC tag rather than the block end. Everything this routine needs
+    // has already been read by that point.
+    SCAN_END(ifs, "</PP_SPIN_ORB>", false);
 }

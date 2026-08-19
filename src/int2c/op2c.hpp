@@ -405,4 +405,54 @@ public:
      * flattening matches the binding convention used by ``Op2c::overlap``.
      */
     std::vector<double> beta_dion(int itype) const;
+
+    /*!
+     * @brief True when element ``itype`` was read from a fully-relativistic
+     * pseudopotential and still carries its j-resolved data.
+     *
+     * NOTE this is the state AFTER ``average_p``: reading a FR file with
+     * ``lspinorb=false`` j-averages the two ``j = l +/- 1/2`` channels into one
+     * and clears the flag, so a false here means "no j-dependence is available",
+     * not "the file had none".
+     */
+    bool beta_has_so(int itype) const;
+
+    /*!
+     * @brief Total angular momentum (j) of each projector channel for ``itype``.
+     *
+     * Length is ``beta_nbeta(itype)``, paired index-for-index with
+     * ``beta_lll``. All zero when ``beta_has_so`` is false.
+     */
+    std::vector<double> beta_jjj(int itype) const;
+
+    /*!
+     * @brief Number of m-resolved projectors, ``nh = sum_channels (2l+1)``.
+     *
+     * This is the leading dimension of the spinor strength tensor returned by
+     * ``beta_d_so``, and it is the m-EXPANDED count -- unlike ``beta_nbeta``,
+     * which counts (l, zeta) channels.
+     */
+    int beta_nh(int itype) const;
+
+    /*!
+     * @brief Complex 2x2 spinor projector strength tensor ``D^{s1 s2}`` for ``itype``.
+     *
+     * Returns ``4 * nh * nh`` values, flattened row-major as
+     * ``[is][ip1][ip2]`` with ``is = 2*s1 + s2`` in {0: up-up, 1: up-down,
+     * 2: down-up, 3: down-down} and ``nh = beta_nh(itype)``.
+     *
+     * This is ``Atom_pseudo::d_so``, built in ``setup_nonlocal`` as
+     * ``dion(p1,p2) * fcoef(s1,s2,ip1,ip2)`` -- the Clebsch-Gordan projection of
+     * the (l, j, mj) spin-angular functions onto the real-harmonic basis (see
+     * ``pseudopotential/soc.cpp``). It is the ONLY place the spin-orbit
+     * interaction enters a separable nonlocal operator: the ``<phi|beta>``
+     * integrals themselves are real and spin-independent.
+     *
+     * The index order of ``ip`` is the pseudopotential FILE's beta order
+     * (channel-major, m-minor), which is NOT necessarily the (l, zeta, m) order
+     * that ``orb_r_beta`` emits its columns in; a caller contracting the two
+     * must permute. Non-spin-orbit elements still return a valid tensor, with
+     * the scalar ``dion`` on the two diagonal spin blocks and zero off-diagonal.
+     */
+    std::vector<std::complex<double>> beta_d_so(int itype) const;
 };

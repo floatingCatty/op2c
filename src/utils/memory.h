@@ -2,6 +2,7 @@
 #define MEMORY_H
 
 #include <fstream>
+#include <ostream>
 #include <string>
 
 namespace ModuleBase
@@ -17,6 +18,15 @@ namespace ModuleBase
 class Memory
 {
   public:
+    // Where the "Warning_Memory_Consuming" advisories go. Default std::cout preserves the
+    // historical behaviour for standalone callers; a host application that owns its console
+    // (rescu++ prints its own run header and SCF log) points this at its log file instead,
+    // or at nullptr to silence it. Same principle as routing the pseudopotential report
+    // through the Logger: a library should not write on the caller's console uninvited.
+    static void set_log(std::ostream* os) { out_ = os; }
+    static std::ostream* log() { return out_; }
+    static std::ostream* out_;
+
     Memory();
     ~Memory();
 

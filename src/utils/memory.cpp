@@ -8,6 +8,10 @@
 
 namespace ModuleBase
 {
+
+// Default: the historical std::cout, so standalone op2c users see no change.
+std::ostream* Memory::out_ = &std::cout;
+
 //    8 bit  = 1 Byte
 // 1024 Byte = 1 KB
 // 1024 KB   = 1 MB
@@ -150,7 +154,10 @@ double Memory::record
 
 	if(consume[find] > 5)
 	{
-		std::cout << "\n Warning_Memory_Consuming allocated: " << " "<<name[find]<<" "<<consume[find]<<" MB" << std::endl;
+		if (Memory::out_ != nullptr)
+		{
+			*Memory::out_ << "\n Warning_Memory_Consuming allocated: " << " "<<name[find]<<" "<<consume[find]<<" MB" << std::endl;
+		}
 	}
 	return consume[find];
 }
@@ -212,7 +219,10 @@ void Memory::record
 			consume[find] = size_mb;
 			if(consume[find] > 5)
 			{
-				std::cout << "\n Warning_Memory_Consuming allocated: " << " "<<name[find]<<" "<<consume[find]<<" MB" << std::endl;
+				if (Memory::out_ != nullptr)
+		{
+			*Memory::out_ << "\n Warning_Memory_Consuming allocated: " << " "<<name[find]<<" "<<consume[find]<<" MB" << std::endl;
+		}
 			}
 		}
 	}

@@ -346,6 +346,14 @@ void bind_atom_pseudo(py::module &m) {
         .def_property_readonly("ecutwfc", [](const Atom_pseudo& s) { return s.ecutwfc; })
         .def_property_readonly("ecutrho", [](const Atom_pseudo& s) { return s.ecutrho; })
         .def_property_readonly("has_so", [](const Atom_pseudo& s) { return s.has_so; })
+        // Total angular momentum j of each projector channel, paired index-for-index with
+        // ``lll``. Only meaningful while ``has_so`` is true: reading a fully-relativistic
+        // file with lspinorb=false j-averages the two j = l +/- 1/2 channels into one and
+        // clears the flag, after which this is stale.
+        .def_property_readonly("jjj", [](const Atom_pseudo& s) {
+            return std::vector<double>(s.jjj.begin(), s.jjj.end());
+        })
+        .def_property_readonly("nh", [](const Atom_pseudo& s) { return s.nh; })
         .def_property_readonly("nlcc", [](const Atom_pseudo& s) { return s.nlcc; })
         .def_property_readonly("xc_func", [](const Atom_pseudo& s) { return s.xc_func; })
         .def_property_readonly("rcut", [](const Atom_pseudo& s) { return s.rcut; })
@@ -616,6 +624,30 @@ void bind_op2c(py::module &m) {
                 return arr;
              }, py::arg("itype"),
              "Channel-space projector strength matrix D (shape (nbeta, nbeta)).")
+        .def("beta_has_so", &Op2c::beta_has_so, py::arg("itype"),
+             "True if element ``itype`` still carries j-resolved (fully-relativistic) projector "
+             "data. False after a FR pseudo has been j-averaged (lspinorb=False).")
+        .def("beta_jjj", [](Op2c& self, int itype) {
+                auto v = self.beta_jjj(itype);
+                return py::array(v.size(), v.data());
+             }, py::arg("itype"),
+             "Per-channel total angular momentum j (length ``beta_nbeta``, paired with "
+             "``beta_lll``). All zero when ``beta_has_so`` is False.")
+        .def("beta_nh", &Op2c::beta_nh, py::arg("itype"),
+             "Number of m-resolved projectors, nh = sum over channels of (2l+1).")
+        .def("beta_d_so", [](Op2c& self, int itype) {
+                auto v = self.beta_d_so(itype);
+                int nh = self.beta_nh(itype);
+                py::array_t<std::complex<double>> arr({4, nh, nh});
+                std::memcpy(arr.mutable_data(), v.data(),
+                            sizeof(std::complex<double>) * v.size());
+                return arr;
+             }, py::arg("itype"),
+             "Complex 2x2 spinor projector strength tensor, shape (4, nh, nh) with the leading "
+             "index is = 2*s1 + s2 in {0:uu, 1:ud, 2:du, 3:dd}. This is where spin-orbit "
+             "coupling lives; the <phi|beta> integrals themselves are real and spin-independent. "
+             "The ip index follows the pseudopotential FILE's beta order, which may differ from "
+             "the (l, zeta, m) order of ``orb_r_beta`` columns.")
 
 
         .def("overlap", [](Op2c& self, size_t itype, size_t jtype, ModuleBase::Vector3<double> Rij, bool is_transpose) {

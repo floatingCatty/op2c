@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+#include "utils/memory.h"
 
 namespace {
 // ---- Real-spherical-harmonic convention boundary (single source of truth) --------------------
@@ -51,11 +52,34 @@ Op2c::Op2c(size_t ntype, int nspin, bool lspinorb,
     }
     ModuleBase::Logger logger(log_file.empty() ? std::cout : ofs);
 
+    // The two-centre tabulation below emits Memory "Warning_Memory_Consuming" advisories.
+    // Send them wherever this engine's log goes, so a host that passed a log_file gets a
+    // quiet console; restored on the way out because `ofs` dies with this constructor.
+    struct MemoryLogScope {
+        std::ostream* prev;
+        explicit MemoryLogScope(std::ostream* os) : prev(ModuleBase::Memory::log()) {
+            ModuleBase::Memory::set_log(os);
+        }
+        ~MemoryLogScope() { ModuleBase::Memory::set_log(prev); }
+    } _mem_log_scope(log_file.empty() ? &std::cout : static_cast<std::ostream*>(&ofs));
+
     tcbd.build_orb(ntype, orb_name.data(), orb_dir, pm_build, comm);
 
     if(!psd_name.empty()) {
         psds.resize(ntype);
-        read_pseudo(psd_dir, psd_name, "auto", 10.0, false, 0.0, logger, psds, comm);
+        // Pass this engine's ``lspinorb`` through to the reader. It used to be hard-coded
+        // ``false`` here, which silently discarded the whole point of a fully-relativistic
+        // pseudopotential: ``average_p`` j-averages the two ``j = l +/- 1/2`` channels into
+        // one and clears ``has_so``, so ``setup_nonlocal`` then built a spin-DIAGONAL
+        // ``d_so`` and the spin-orbit coupling was gone before anything could read it. The
+        // engine accepted the flag, stored it in the member below, and never used it.
+        //
+        // ``soc_lambda`` scales the spin-orbit strength: average_p keeps the j-resolved
+        // channels untouched only at lambda == 1 (its early return), and interpolates the
+        // two channels toward their common average as lambda -> 0, which switches SOC off
+        // while KEEPING the spinor structure. 1.0 is the physical value and the default in
+        // QE and ABACUS alike; it is ignored outright when lspinorb is false.
+        read_pseudo(psd_dir, psd_name, "auto", 10.0, this->lspinorb, 1.0, logger, psds, comm);
 
         std::vector<BetaRadials> beta_radials(ntype);
         for(size_t itype=0; itype<ntype; ++itype){
@@ -789,6 +813,63 @@ std::vector<double> Op2c::beta_dion(int itype) const {
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
             out[i * n + j] = pp.dion(i, j);
+        }
+    }
+    return out;
+}
+
+bool Op2c::beta_has_so(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_has_so: itype out of range");
+    }
+    return psds[itype].has_so;
+}
+
+std::vector<double> Op2c::beta_jjj(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_jjj: itype out of range");
+    }
+    const auto& pp = psds[itype];
+    std::vector<double> out(pp.nbeta, 0.0);
+    // ``jjj`` is only filled for fully-relativistic files; a scalar-relativistic
+    // pseudo (or a FR one that average_p has since collapsed) leaves it empty, and
+    // zeros are the honest answer there -- j is not defined, not "j = 0".
+    const int n = std::min(static_cast<int>(pp.jjj.size()), pp.nbeta);
+    for (int i = 0; i < n; ++i) {
+        out[i] = pp.jjj[i];
+    }
+    return out;
+}
+
+int Op2c::beta_nh(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_nh: itype out of range");
+    }
+    return psds[itype].nh;
+}
+
+std::vector<std::complex<double>> Op2c::beta_d_so(int itype) const {
+    if (itype < 0 || static_cast<size_t>(itype) >= psds.size()) {
+        throw std::out_of_range("Op2c::beta_d_so: itype out of range");
+    }
+    const auto& pp = psds[itype];
+    const int nh = pp.nh;
+    std::vector<std::complex<double>> out(static_cast<size_t>(4) * nh * nh,
+                                          std::complex<double>(0.0, 0.0));
+    if (nh <= 0) {
+        return out;
+    }
+    // ``d_so`` is allocated (4, nproj_soc + 1, nproj_soc + 1) by set_d_so -- the trailing
+    // +1 is slack, the meaningful range is [0,4) x [0,nh) x [0,nh). Bail out rather than
+    // index into a tensor that setup_nonlocal never filled (nbeta == 0 elements).
+    if (pp.d_so.getBound1() < 4 || pp.d_so.getBound2() < nh || pp.d_so.getBound3() < nh) {
+        return out;
+    }
+    for (int is = 0; is < 4; ++is) {
+        for (int i = 0; i < nh; ++i) {
+            for (int j = 0; j < nh; ++j) {
+                out[(static_cast<size_t>(is) * nh + i) * nh + j] = pp.d_so(is, i, j);
+            }
         }
     }
     return out;

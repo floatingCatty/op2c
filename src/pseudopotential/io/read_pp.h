@@ -103,7 +103,10 @@ public:
     void read_pseudo_upf201_pswfc(std::ifstream& ifs, Atom_pseudo& pp);
     // void read_pseudo_upf201_fullwfc(std::ifstream& ifs);
     void read_pseudo_upf201_so(std::ifstream& ifs, Atom_pseudo& pp);
-    void getnameval(std::ifstream&, int&, std::string*, std::string*);
+    // Parse one XML start-tag's attributes. ``self_closing`` (optional) reports whether the
+    // tag ended with "/>" rather than ">" — i.e. whether it has NO separate closing tag for
+    // the caller to consume. See read_pseudo_upf201_so for why that distinction is load-bearing.
+    void getnameval(std::ifstream&, int&, std::string*, std::string*, bool* self_closing = nullptr);
 
     /**
      * @brief Computes the Q function from its polynomial expansion (r < rinner)
