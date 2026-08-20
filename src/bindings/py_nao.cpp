@@ -13,6 +13,7 @@
 #include "nao/atomic_radials.h"
 #include "nao/custom_radials.h"
 #include "int2c/coulomb_kernel.h"
+#include "int2c/gaunt_table.h"
 #include "pseudopotential/pseudo_atom.h"
 #include "pseudopotential/beta_projectors.h"
 #include "math/linalg/matrix.h"
@@ -413,6 +414,28 @@ void bind_custom_radials(py::module &m) {
         .def_property_readonly("lmax", &CustomRadials::lmax)
         .def_property_readonly("symbol", &CustomRadials::symbol)
         .def("nzeta", &CustomRadials::nzeta, py::arg("l"));
+}
+
+void bind_gaunt_table(py::module &m) {
+    // Real-Gaunt coefficients G(l1,l2,l3,m1,m2,m3) = int Z_{l1m1} Z_{l2m2} Z_{l3m3} dOmega.
+    // Because the Z are real and orthonormal, G is also the expansion coefficient of a
+    // product of two of them: Z_{l1m1} Z_{l2m2} = sum_{l3m3} G(...) Z_{l3m3}. That is what
+    // the localized-RI three-index integral needs to decompose a one-centre orbital product
+    // into angular channels (rescu++ doc/design/27 §3.2).
+    //
+    // NOTE these are op2c's OWN real harmonics, which carry (-1)^m relative to the textbook
+    // ones (see the convention note in gaunt_table.h: Z(1,1) = -c x/r). Using this table
+    // together with TwoCenterIntegrator::calculate keeps one consistent convention
+    // throughout; mixing in an independently-coded Gaunt is how sign bugs get in.
+    py::class_<RealGauntTable>(m, "RealGauntTable")
+        .def(py::init<>())
+        .def("build", &RealGauntTable::build, py::arg("lmax"),
+             "Tabulate for l1,l2 <= lmax and l3 <= 2*lmax.")
+        .def("__call__", [](const RealGauntTable& self, int l1, int l2, int l3,
+                            int m1, int m2, int m3) {
+            return self(l1, l2, l3, m1, m2, m3);
+        }, py::arg("l1"), py::arg("l2"), py::arg("l3"),
+           py::arg("m1"), py::arg("m2"), py::arg("m3"));
 }
 
 void bind_exx_kernel(py::module &m) {
@@ -847,6 +870,7 @@ PYBIND11_MODULE(_op2c, m) {
     bind_atom_pseudo(m);
     bind_custom_radials(m);
     bind_radial_collection(m);
+    bind_gaunt_table(m);
     bind_exx_kernel(m);
     bind_two_center_integrator(m);
     bind_two_center_bundle(m);

@@ -32,10 +32,25 @@ void CustomRadials::build(const NumericalRadial* chi, const int nchi, const int 
     std::fill(norb_, norb_ + lmax_ + 1, 0);
     nphi_ = 0;
 
+    // chi_ MUST be stored sorted by (l, izeta): RadialSet::indexing() numbers the entries
+    // l-ascending then izeta-ascending, and index(l, izeta) reads that numbering straight
+    // out. Storing in the caller's registration order instead silently permutes the set --
+    // chi(1,0) would hand back whatever radial happened to be registered second -- so a
+    // caller that lists, say, a p radial before an s one gets a different (wrong) integral
+    // for the same input. Sorting here is STABLE, so izeta within an l is still order of
+    // appearance, which is what callers index by.
+    std::vector<int> order(nchi_);
+    for (int i = 0; i < nchi_; ++i)
+    {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&chi](int a, int b) { return chi[a].l() < chi[b].l(); });
+
     chi_ = new NumericalRadial[nchi_];
     for (int ichi = 0; ichi != nchi_; ++ichi)
     {
-        const NumericalRadial& src = chi[ichi];
+        const NumericalRadial& src = chi[order[ichi]];
         const int l = src.l();
         if (src.nr() <= 0)
         {
@@ -90,11 +105,20 @@ void CustomRadials::build(const RadialSet* const other, const int itype, const i
     std::fill(norb_, norb_ + lmax_ + 1, 0);
     nphi_ = 0;
 
+    std::vector<int> order(other->nchi());
+    for (int i = 0; i < other->nchi(); ++i)
+    {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [other, pm](int a, int b) {
+        return other->cbegin()[a].l() + pm < other->cbegin()[b].l() + pm;
+    });
+
     chi_ = new NumericalRadial[other->nchi()];
     int ichi_this = 0;
     for (int ichi = 0; ichi != other->nchi(); ++ichi)
     {
-        const NumericalRadial& src = other->cbegin()[ichi];
+        const NumericalRadial& src = other->cbegin()[order[ichi]];
         const int l_new = src.l() + pm;
         if (l_new < 0)
         {
