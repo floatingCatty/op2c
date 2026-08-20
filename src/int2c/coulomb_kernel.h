@@ -1,0 +1,148 @@
+#ifndef OP2C_COULOMB_KERNEL_H_
+#define OP2C_COULOMB_KERNEL_H_
+
+#include "nao/radial_function.h"
+
+#include <cmath>
+#include <stdexcept>
+
+/**
+ * @file coulomb_kernel.h
+ * @brief Fourier weights for the (screened) Coulomb kernel used by exact exchange.
+ *
+ * rescu++ doc/design/27 §3.1. A two-center integral against a *convolution* kernel
+ *
+ *     I(R) = \int\int phi_1(r) v(r - r') phi_2(r' - R) dr dr'
+ *
+ * is the ordinary two-center overlap machinery with one extra multiplicative factor
+ * vtilde(k) in the k-space integrand, because both objects share the same measure:
+ *
+ *     S(R) = (2pi)^-3 \int  phi~_1*(k)          phi~_2(k) e^{ikR} dk       (overlap)
+ *     I(R) = (2pi)^-3 \int  phi~_1*(k) vtilde(k) phi~_2(k) e^{ikR} dk       (kernel)
+ *
+ * So the whole "Coulomb engine" the exchange work needs is a kernel weight applied to
+ * the k-grid inside TwoCenterTable::_tabulate -- no new transform, no new quadrature.
+ *
+ * Two kernels are supported, matching the two operator codes:
+ *
+ *   'H'  screened / short-range, v(r) = erfc(omega r) / r   [HSE]
+ *        vtilde(k) = 4 pi (1 - exp(-k^2 / 4 omega^2)) / k^2,   vtilde(0) = pi / omega^2
+ *
+ *   'C'  bare but spherically truncated, v(r) = 1/r for r < r_cut, 0 beyond
+ *        vtilde(k) = 4 pi (1 - cos(k r_cut)) / k^2,             vtilde(0) = 2 pi r_cut^2
+ *
+ *        NOTE the validity condition, which is the caller's to satisfy and cannot be
+ *        checked here: the truncated kernel equals the bare one for a given pair only
+ *        while r_cut exceeds every |r - r'| the pair spans, i.e.
+ *            r_cut >= table_cutoff + bra.rcut_max() + ket.rcut_max().
+ *        Below that the table is a *deliberately* truncated interaction (which is a
+ *        legitimate thing to want -- CP2K uses a short truncated Coulomb as an RI metric
+ *        on purpose), so a smaller r_cut is not an error, just a different operator.
+ *
+ * Both weights are ANALYTIC AT k = 0. For 'H' that is the reason a screened hybrid needs
+ * no Gamma-point singularity treatment at all; for 'C' the truncation is what makes the
+ * bare kernel representable in the first place (untruncated 1/r has a divergent k=0
+ * component). The erfc+truncation combination has no closed form and is rejected.
+ */
+namespace ExxKernel
+{
+
+/// Fourier weight vtilde(k) of a (screened and/or truncated) Coulomb kernel.
+struct CoulombWeight
+{
+    double omega = 0.0; ///< > 0: erfc(omega r)/r screening; 0: bare
+    double r_cut = 0.0; ///< > 0: spherical (Spencer-Alavi) truncation; 0: none
+
+    /// vtilde(k), evaluated stably down to k = 0.
+    double operator()(double k) const
+    {
+        const double k2 = k * k;
+        if (omega > 0.0)
+        {
+            // (pi/omega^2) * (1 - exp(-x))/x with x = k^2/(4 omega^2); -expm1(-x)/x is
+            // stable as x -> 0 and tends to 1, giving the finite limit pi/omega^2.
+            const double x = k2 / (4.0 * omega * omega);
+            const double s = (x < 1e-12) ? (1.0 - 0.5 * x) : (-std::expm1(-x) / x);
+            return (M_PI / (omega * omega)) * s;
+        }
+        // 4 pi (1 - cos u)/k^2 = 2 pi r_cut^2 * sinc^2(u/2), u = k r_cut.
+        const double half_u = 0.5 * k * r_cut;
+        const double sinc = (std::abs(half_u) < 1e-12) ? (1.0 - half_u * half_u / 6.0)
+                                                       : (std::sin(half_u) / half_u);
+        return 2.0 * M_PI * r_cut * r_cut * sinc * sinc;
+    }
+};
+
+/// Whether @p op is one of the Coulomb-kernel operator codes handled here.
+inline bool is_kernel_op(const char op) { return op == 'H' || op == 'C'; }
+
+/**
+ * @brief Validate and package the kernel parameters for an operator code.
+ * @throws std::invalid_argument on a parameter combination with no closed form.
+ */
+inline CoulombWeight make_weight(const char op, const double omega, const double r_cut)
+{
+    if (op == 'H')
+    {
+        if (!(omega > 0.0))
+        {
+            throw std::invalid_argument("op2c: screened Coulomb op 'H' requires omega > 0");
+        }
+        if (r_cut > 0.0)
+        {
+            throw std::invalid_argument(
+                "op2c: erfc screening combined with spherical truncation has no closed-form "
+                "Fourier weight; use 'H' (untruncated erfc) or 'C' (truncated bare)");
+        }
+        return CoulombWeight{omega, 0.0};
+    }
+    if (op == 'C')
+    {
+        if (!(r_cut > 0.0))
+        {
+            throw std::invalid_argument(
+                "op2c: bare Coulomb op 'C' requires r_cut > 0 (untruncated 1/r has a "
+                "divergent k=0 Fourier component)");
+        }
+        if (omega > 0.0)
+        {
+            throw std::invalid_argument("op2c: op 'C' is the bare kernel; pass omega only to 'H'");
+        }
+        return CoulombWeight{0.0, r_cut};
+    }
+    throw std::invalid_argument("op2c: not a Coulomb-kernel operator code");
+}
+
+/**
+ * @brief Kernel-transformed radial: Qtilde(k) = vtilde(k) Ptilde(k)  (doc 27 §3.2).
+ *
+ * Q is the potential generated by the auxiliary function P, and is what turns the
+ * three-index LRI integral (P | phi phi) into a plain two-center overlap
+ * <(Q.phi_i)^A | phi_k^K>. Built directly in k-space, so the inverse transform back to
+ * r-space is done once by NumericalRadial itself.
+ *
+ * @param[in]  P       source radial (must carry k-space values)
+ * @param[in]  w       kernel weight
+ * @param[out] Q       result; same l, izeta, itype and k-grid as @p P
+ */
+void kernel_transform(const NumericalRadial& P, const CoulombWeight& w, NumericalRadial& Q);
+
+/**
+ * @brief One-center kernel Gram matrix element (doc 27 §3.3).
+ *
+ * For two radials on the SAME center sharing (l, m),
+ *
+ *     <chi_a Y_lm | v | chi_b Y_lm> = \int dk k^2 chi~_a(k) chi~_b(k) vtilde(k)
+ *
+ * with coefficient exactly 1 in op2c's SBT normalisation -- the vtilde -> 1 case is the
+ * standard Parseval identity \int chi_a chi_b r^2 dr = \int chi~_a chi~_b k^2 dk. This is
+ * the metric the pivoted-Cholesky auxiliary-basis reduction is built on.
+ *
+ * @note The same number is the R = 0 limit of the two-center table, so this function and
+ *       TwoCenterIntegrator::calculate at vR = 0 cross-check each other.
+ */
+double one_center_gram(const NumericalRadial& a, const NumericalRadial& b, const CoulombWeight& w);
+
+} // namespace ExxKernel
+
+#endif

@@ -9,12 +9,15 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 
 void TwoCenterTable::build(const RadialCollection& bra,
                            const RadialCollection& ket,
                            const char op,
                            const int nr,
-                           const double cutoff)
+                           const double cutoff,
+                           const double omega,
+                           const double r_cut)
 {
 #ifdef __DEBUG
     assert(nr >= 3 && cutoff > 0.0);
@@ -22,7 +25,28 @@ void TwoCenterTable::build(const RadialCollection& bra,
 
     cleanup();
 
+    // Every radial must carry k-space values: the whole table is built by spherical Bessel
+    // transform, and a collection that was never given a k-grid otherwise reads kgrid_[-1]
+    // and segfaults deep inside the transform. Collections assembled in memory (CustomRadials)
+    // are r-space only until set_uniform_grid(for_r_space=false, ...) is called on them.
+    for (const RadialCollection* coll : {&bra, &ket})
+    {
+        for (const NumericalRadial* const* it = coll->cbegin(); it != coll->cend(); ++it)
+        {
+            if ((*it)->nk() <= 0)
+            {
+                throw std::runtime_error(
+                    "TwoCenterTable::build: radial '" + (*it)->symbol() + "' has no k-space grid; "
+                    "call RadialCollection::set_uniform_grid(false, ...) before tabulating");
+            }
+        }
+    }
+
     op_ = op;
+    // Validate the kernel parameters up front so a bad (op, omega, r_cut) combination
+    // fails at build time rather than producing a silently wrong table.
+    kernel_ = ExxKernel::is_kernel_op(op) ? ExxKernel::make_weight(op, omega, r_cut)
+                                          : ExxKernel::CoulombWeight{};
     nr_ = nr;
     rmax_ = cutoff;
 
@@ -106,6 +130,7 @@ int& TwoCenterTable::table_index(const NumericalRadial* it1, const NumericalRadi
 void TwoCenterTable::cleanup()
 {
     op_ = '\0';
+    kernel_ = ExxKernel::CoulombWeight{};
     ntab_ = 0;
     nr_ = 0;
     rmax_ = 0.0;
@@ -181,6 +206,17 @@ void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial
 
     std::vector<double> fk(nk);
     std::transform(kv1, kv1 + nk, kv2, fk.begin(), std::multiplies<double>());
+
+    // Coulomb-kernel operators (doc/design/27 §3.1): a two-center integral against a
+    // convolution kernel is the overlap integrand times vtilde(k). Both weights are
+    // finite at k = 0, so no point of the grid needs special handling.
+    if (ExxKernel::is_kernel_op(op_))
+    {
+        for (int ik = 0; ik < nk; ++ik)
+        {
+            fk[ik] *= kernel_(kgrid[ik]);
+        }
+    }
 
     double* rgrid_tab = new double[nr_];
     double dr = rmax_ / (nr_ - 1);
@@ -261,12 +297,23 @@ void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial
         case 'T':
             op_exp += 4;
             break;
+        case 'H':
+        case 'C':
+            // Kernel ops carry the same k^2 measure as the overlap; the k-dependence of
+            // the kernel itself is applied as an explicit weight below, not as a power.
+            op_exp += 2;
+            break;
         default:; // currently not supposed to happen
         }
 
+        const bool kernel_op = ExxKernel::is_kernel_op(op_);
         for (int ik = 0; ik != nk; ++ik)
         {
             fk[ik] = it1->kvalue(ik) * it2->kvalue(ik) * std::pow(kgrid[ik], op_exp);
+            if (kernel_op)
+            {
+                fk[ik] *= kernel_(kgrid[ik]);
+            }
         }
 
         tab[0] = ModuleBase::Integral::simpson(nk, fk, &h[1]) * ModuleBase::FOUR_PI / dfact(2 * l + 1);

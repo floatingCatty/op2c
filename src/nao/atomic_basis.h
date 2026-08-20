@@ -17,6 +17,7 @@
  * from all elements involved in calculation.
  */
 #include "pseudopotential/beta_projectors.h"
+#include "nao/custom_radials.h"
 
 class RadialCollection
 {
@@ -37,6 +38,9 @@ class RadialCollection
     void build(const int ntype, BetaRadials* const nls);
     /// Builds the collection from AtomicRadials objects.
     void build(const int ntype, AtomicRadials* const nls);
+    /// Builds the collection from CustomRadials objects (in-memory radials, e.g. the
+    /// exact-exchange auxiliary basis; rescu++ doc/design/27 sec 4).
+    void build(const int ntype, CustomRadials* const nls);
     /// Builds the collection from RadialCollection objects and another radius cutoff.
     void build(const RadialCollection* nls, double radius = 0.0);
 

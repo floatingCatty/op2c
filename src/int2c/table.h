@@ -2,6 +2,7 @@
 #define TWO_CENTER_TABLE_H
 
 #include <ATen/tensor.h>
+#include "int2c/coulomb_kernel.h"
 #include "math/spherical_bessel_transformer.h"
 #include "nao/atomic_basis.h"
 #include "nao/radial_function.h"
@@ -20,7 +21,9 @@ class TwoCenterTable
                const RadialCollection& ket,  //!< [in] radial collection involved in <bra|op|ket>
                const char op,                //!< [in] operator of the two-center integral
                const int nr,                 //!< [in] number of table grid points
-               const double cutoff           //!< [in] cutoff radius of the table
+               const double cutoff,          //!< [in] cutoff radius of the table
+               const double omega = 0.0,     //!< [in] erfc screening for op 'H' (bohr^-1)
+               const double r_cut = 0.0      //!< [in] spherical truncation for op 'C' (bohr)
     );
 
     /*!
@@ -86,6 +89,9 @@ class TwoCenterTable
 
   private:
     char op_ = '\0';   //!< operator associated with the present table
+    /// Fourier weight of the Coulomb kernel; only consulted when op_ is 'H' or 'C'
+    /// (doc/design/27 §3.1). Default-constructed and unused for 'S'/'T'/'R'/'U'.
+    ExxKernel::CoulombWeight kernel_{};
     int ntab_ = 0;     //!< number of table entries
     int nr_ = 0;       //!< number of radial points of each table
     double rmax_= 0.0; //!< cutoff radius of the table

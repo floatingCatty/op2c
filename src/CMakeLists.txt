@@ -73,6 +73,7 @@ add_library(nao_core
     nao/orbital_evaluator.cpp
     nao/atomic_basis.cpp
     nao/atomic_radials.cpp # Check if needed or legacy
+    nao/custom_radials.cpp
 )
 target_link_libraries(nao_core PUBLIC nao_math MATIO::MATIO)
 
@@ -98,6 +99,7 @@ target_link_libraries(nao_pseudo PUBLIC nao_core)
 
 add_library(nao_int2c
     int2c/table.cpp
+    int2c/coulomb_kernel.cpp
     int2c/integrator.cpp
     int2c/bundle.cpp
     int2c/gaunt_table.cpp

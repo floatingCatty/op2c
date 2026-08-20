@@ -31,10 +31,12 @@ void TwoCenterIntegrator::tabulate(const RadialCollection& bra,
                                    const RadialCollection& ket,
                                    const char op,
                                    const int nr,
-                                   const double cutoff)
+                                   const double cutoff,
+                                   const double omega,
+                                   const double r_cut)
 {
     op_ = op;
-    table_.build(bra, ket, op, nr, cutoff);
+    table_.build(bra, ket, op, nr, cutoff, omega, r_cut);
     gaunt_table_->build(std::max(bra.lmax(), ket.lmax()));
     is_tabulated_ = true;
 }

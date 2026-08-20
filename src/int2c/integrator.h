@@ -50,7 +50,9 @@ class TwoCenterIntegrator
                   const RadialCollection& ket,
                   const char op,
                   const int nr,
-                  const double cutoff
+                  const double cutoff,
+                  const double omega = 0.0, //!< [in] erfc screening for the 'H' kernel op (bohr^-1)
+                  const double r_cut = 0.0  //!< [in] spherical truncation for the 'C' kernel op (bohr)
     );
 
     ~TwoCenterIntegrator();
