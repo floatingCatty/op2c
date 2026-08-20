@@ -6,6 +6,7 @@
 #include "math/spherical_bessel_transformer.h"
 #include "nao/atomic_basis.h"
 #include "nao/radial_function.h"
+#include <tuple>
 #include <vector>
 
 class TwoCenterTable
@@ -138,6 +139,21 @@ class TwoCenterTable
     /// various looped functions during the construction of table
     void _indexing(const NumericalRadial* it1, const NumericalRadial* it2, const int l);
     void _tabulate(const NumericalRadial* it1, const NumericalRadial* it2, const int l);
+
+    /**
+     * @brief Tabulate one (bra, ket, l) triple using a CALLER-SUPPLIED transformer.
+     *
+     * The transform writes into the shared ``jl_`` cache inside the transformer, so a
+     * threaded table build needs one transformer PER THREAD -- copying ``sbt_`` will not
+     * do, because SphericalBesselTransformer holds a shared_ptr<Impl> and its copy
+     * constructor shares that state rather than duplicating it.
+     */
+    void _tabulate_with(ModuleBase::SphericalBesselTransformer& sbt,
+                        const NumericalRadial* it1, const NumericalRadial* it2, const int l);
+
+    /// Collect every (bra, ket, l) triple two_center_loop would visit, in the same order.
+    void _collect_jobs(const RadialCollection& bra, const RadialCollection& ket,
+                       std::vector<std::tuple<const NumericalRadial*, const NumericalRadial*, int>>& jobs) const;
 };
 
 #endif

@@ -342,21 +342,33 @@ void SphericalBesselTransformer::Impl::_rfft_prepare(const int n)
 {
     if (n != sz_planned_)
     {
-        if (f_)
+        // FFTW's PLANNER is global and not thread-safe: fftw_alloc_real, fftw_free,
+        // fftw_destroy_plan and fftw_plan_* all mutate planner state, so two threads
+        // preparing plans at once corrupt the heap ("double free or corruption").
+        // fftw_execute on distinct plans/buffers IS thread-safe, so only this
+        // preparation needs serializing -- and because each thread owns its own
+        // transformer, it runs once per thread per size and costs nothing.
+        // (Threaded caller: TwoCenterTable::build.)
+#ifdef _OPENMP
+#pragma omp critical(op2c_fftw_planner)
+#endif
         {
-            fftw_free(f_);
-        }
-        f_ = fftw_alloc_real(sizeof(double) * 2 * (n/2 + 1));
-        // see FFTW documentation "one-dimensional DFTs of real data"
+            if (f_)
+            {
+                fftw_free(f_);
+            }
+            f_ = fftw_alloc_real(sizeof(double) * 2 * (n/2 + 1));
+            // see FFTW documentation "one-dimensional DFTs of real data"
 
-        if (rfft_plan_)
-        {
-            fftw_destroy_plan(rfft_plan_);
-        }
-        auto* out = reinterpret_cast<fftw_complex*>(f_); // in-place transform
-        rfft_plan_ = fftw_plan_dft_r2c_1d(n, f_, out, fftw_plan_flag_);
+            if (rfft_plan_)
+            {
+                fftw_destroy_plan(rfft_plan_);
+            }
+            auto* out = reinterpret_cast<fftw_complex*>(f_); // in-place transform
+            rfft_plan_ = fftw_plan_dft_r2c_1d(n, f_, out, fftw_plan_flag_);
 
-        sz_planned_ = n;
+            sz_planned_ = n;
+        }
     }
 }
 
@@ -394,19 +406,27 @@ void SphericalBesselTransformer::Impl::_tabulate(
 
 void SphericalBesselTransformer::Impl::_rfft_clear()
 {
-    if (rfft_plan_)
+    // Same global-planner hazard as _rfft_prepare, and it bites on the way OUT too:
+    // per-thread transformers are destroyed together at the end of a parallel region,
+    // so their fftw_destroy_plan/fftw_free calls collide unless serialized.
+#ifdef _OPENMP
+#pragma omp critical(op2c_fftw_planner)
+#endif
     {
-        fftw_destroy_plan(rfft_plan_);
-        rfft_plan_ = nullptr;
-    }
+        if (rfft_plan_)
+        {
+            fftw_destroy_plan(rfft_plan_);
+            rfft_plan_ = nullptr;
+        }
 
-    if (f_)
-    {
-        fftw_free(f_);
-        f_ = nullptr;
-    }
+        if (f_)
+        {
+            fftw_free(f_);
+            f_ = nullptr;
+        }
 
-    sz_planned_ = 0;
+        sz_planned_ = 0;
+    }
 }
 
 

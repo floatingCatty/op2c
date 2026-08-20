@@ -1,5 +1,8 @@
 #include "int2c/table.h"
 
+#include <tuple>
+#include <vector>
+
 #include "math/constants.h"
 #include "math/interpolation/cubic_spline.h"
 #include "math/math_integral.h"
@@ -74,7 +77,51 @@ void TwoCenterTable::build(const RadialCollection& bra,
 
     table_.resize({ntab_, nr_});
     dtable_.resize({ntab_, nr_});
-    two_center_loop(bra, ket, &TwoCenterTable::_tabulate);
+
+    // Threaded table build. Every (bra, ket, l) triple writes to its OWN row of table_
+    // (its `table_index`), so the pass is embarrassingly parallel -- the only shared
+    // state is the spherical-Bessel transformer, whose `jl_` cache each thread must own
+    // privately. Copying sbt_ would NOT achieve that (shared_ptr<Impl>, defaulted copy
+    // ctor), so each thread constructs its own.
+    //
+    // This is the dominant cost of a hybrid-functional setup: measured 96% of a 403 s
+    // exchange-operator build on a DZP-class basis (rescu++ doc/design/27 §5.6), because
+    // non-FFT-compliant grids send every table down the O(nk*nr) `direct` path. Threading
+    // changes no number at all, which is why it comes before the alternatives.
+    std::vector<std::tuple<const NumericalRadial*, const NumericalRadial*, int>> jobs;
+    _collect_jobs(bra, ket, jobs);
+    const std::ptrdiff_t njob = static_cast<std::ptrdiff_t>(jobs.size());
+#ifdef _OPENMP
+#pragma omp parallel
+    {
+        ModuleBase::SphericalBesselTransformer local_sbt;
+#pragma omp for schedule(dynamic)
+        for (std::ptrdiff_t i = 0; i < njob; ++i)
+        {
+            _tabulate_with(local_sbt, std::get<0>(jobs[i]), std::get<1>(jobs[i]),
+                           std::get<2>(jobs[i]));
+        }
+    }
+#else
+    for (std::ptrdiff_t i = 0; i < njob; ++i)
+    {
+        _tabulate_with(sbt_, std::get<0>(jobs[i]), std::get<1>(jobs[i]), std::get<2>(jobs[i]));
+    }
+#endif
+}
+
+void TwoCenterTable::_collect_jobs(
+    const RadialCollection& bra,
+    const RadialCollection& ket,
+    std::vector<std::tuple<const NumericalRadial*, const NumericalRadial*, int>>& jobs) const
+{
+    // Same nesting and order as two_center_loop, so the work set is identical.
+    for (int l = 0; l <= bra.lmax() + ket.lmax(); ++l)
+        for (int l1 = 0; l1 <= bra.lmax(); ++l1)
+            for (const NumericalRadial* const* it1 = bra.cbegin(l1); it1 != bra.cend(l1); ++it1)
+                for (int l2 = std::abs(l1 - l); l2 <= std::min(ket.lmax(), l + l1); l2 += 2)
+                    for (const NumericalRadial* const* it2 = ket.cbegin(l2); it2 != ket.cend(l2); ++it2)
+                        jobs.emplace_back(*it1, *it2, l);
 }
 
 const double* TwoCenterTable::table(const int itype1,
@@ -187,6 +234,12 @@ void TwoCenterTable::_indexing(const NumericalRadial* it1, const NumericalRadial
 
 void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial* it2, const int l)
 {
+    _tabulate_with(sbt_, it1, it2, l);
+}
+
+void TwoCenterTable::_tabulate_with(ModuleBase::SphericalBesselTransformer& sbt,
+                                    const NumericalRadial* it1, const NumericalRadial* it2, const int l)
+{
     int itab = table_index(it1, it2, l);
     double* tab = table_.inner_most_ptr<double>(itab);
 
@@ -218,7 +271,8 @@ void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial
         }
     }
 
-    double* rgrid_tab = new double[nr_];
+    std::vector<double> rgrid_tab_buf(nr_);
+    double* rgrid_tab = rgrid_tab_buf.data();
     double dr = rmax_ / (nr_ - 1);
     std::for_each(rgrid_tab, rgrid_tab + nr_, [dr, &rgrid_tab](double& r) { r = dr * (int)(&r - rgrid_tab); });
 
@@ -243,14 +297,13 @@ void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial
 
     if (use_radrfft)
     {
-        sbt_.radrfft(l, nk, it1->kmax(), fk.data(), tab, it1->pk() + it2->pk() + op_pk);
+        sbt.radrfft(l, nk, it1->kmax(), fk.data(), tab, it1->pk() + it2->pk() + op_pk);
     }
     else
     {
-        sbt_.direct(l, nk, kgrid, fk.data(), nr_, rgrid_tab, tab, it1->pk() + it2->pk() + op_pk);
+        sbt.direct(l, nk, kgrid, fk.data(), nr_, rgrid_tab, tab, it1->pk() + it2->pk() + op_pk);
     }
 
-    delete[] rgrid_tab;
 
     // spherical Bessel transform has a prefactor of sqrt(2/pi)
     // and the prefactor for the two-center integral radial table is 4*pi
