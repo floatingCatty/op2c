@@ -20,7 +20,8 @@ void TwoCenterTable::build(const RadialCollection& bra,
                            const int nr,
                            const double cutoff,
                            const double omega,
-                           const double r_cut)
+                           const double r_cut,
+                           const std::function<bool(int, int)>& tabulate_pair)
 {
 #ifdef __DEBUG
     assert(nr >= 3 && cutoff > 0.0);
@@ -72,8 +73,62 @@ void TwoCenterTable::build(const RadialCollection& bra,
                        bra.lmax() + ket.lmax() + 1});
     std::fill(index_map_.data<int>(), index_map_.data<int>() + index_map_.NumElements(), -1);
 
+    // element pairs left to direct evaluation: the block kernel integrates them on the k grid per
+    // image instead of reading a row (the post-SCF correction's all-primitive pairs, whose table
+    // over every pair of ~1000 radials took ~20 GB; their few metric blocks need no table)
+    direct_.clear();
+    kw_.clear(); kc_.clear();
+    bra_ = ket_ = nullptr;
+    ntype_ket_ = ket.ntype();
+    if (tabulate_pair)
+    {
+        direct_.assign(static_cast<std::size_t>(bra.ntype()) * ket.ntype(), 0);
+        bool any = false;
+        for (int t1 = 0; t1 < bra.ntype(); ++t1)
+            for (int t2 = 0; t2 < ket.ntype(); ++t2)
+                if (!tabulate_pair(t1, t2))
+                    direct_[static_cast<std::size_t>(t1) * ntype_ket_ + t2] = 1, any = true;
+        if (!any)
+            direct_.clear();
+        else
+        {
+            if (!(ExxKernel::is_kernel_op(op) || op == 'S'))
+                throw std::runtime_error("TwoCenterTable::build: direct pairs are for the overlap and kernel ops");
+            const NumericalRadial* r0 = *bra.cbegin();
+            const int nk = r0->nk();
+            const double* kg = r0->kgrid();
+            for (const RadialCollection* coll : {&bra, &ket})
+                for (const NumericalRadial* const* it = coll->cbegin(); it != coll->cend(); ++it)
+                    if ((*it)->nk() != nk || (*it)->pk() != 0 || std::abs((*it)->kgrid()[nk - 1] - kg[nk - 1]) > 1e-12)
+                        throw std::runtime_error("TwoCenterTable::build: direct pairs need one k grid and pk = 0");
+            for (int i = 1; i < nk; ++i)
+                if (std::abs(kg[i] - kg[i - 1] - (kg[1] - kg[0])) > 1e-9 * kg[nk - 1] || kg[0] != 0.0)
+                    throw std::runtime_error("TwoCenterTable::build: direct pairs need a uniform k grid from 0");
+            // Trapezoid weights times k^2, the kernel and the table's 4 pi. The integrand k^2 v(k)
+            // kv_a(k) kv_b(k) j_l(kR) is even in k (l = l_a + l_b mod 2), so the uniform sum is
+            // spectrally accurate (Poisson: its error is the alias image at 2 pi / dk - R) and is the
+            // very sum an FFT-compliant table row evaluates. Simpson's rule, 4/3 T(dk) - 1/3 T(2 dk),
+            // carries T(2 dk)'s image at pi / dk - R: measured 1e-6 relative at R = 0 to 1.3e-4 at
+            // 10 bohr against the table (Bessel primitives r_c 8, dk 0.079).
+            const ExxKernel::CoulombWeight w = kernel_;
+            kc_.assign(kg, kg + nk);
+            kw_.assign(nk, 0.0);
+            const double dk = kg[1] - kg[0];
+            for (int i = 0; i < nk; ++i)
+                kw_[i] = (i == 0 || i == nk - 1 ? 0.5 * dk : dk) * kg[i] * kg[i] * ModuleBase::FOUR_PI
+                         * (ExxKernel::is_kernel_op(op) ? w(kg[i]) : 1.0);
+            bra_ = &bra;
+            ket_ = &ket;
+        }
+    }
+
+    // bra and ket the same collection (an auxiliary basis' Coulomb table): a row is the transform of
+    // the product of the two radials' k-space values, so (a, b, l) and (b, a, l) are the same row --
+    // tabulate the pair once and point both entries at it (half the time and memory)
+    symmetric_ = (&bra == &ket);
     ntab_ = 0;
     two_center_loop(bra, ket, &TwoCenterTable::_indexing);
+    if (symmetric_) two_center_loop(bra, ket, &TwoCenterTable::_mirror);
 
     table_.resize({ntab_, nr_});
     dtable_.resize({ntab_, nr_});
@@ -94,7 +149,11 @@ void TwoCenterTable::build(const RadialCollection& bra,
 #ifdef _OPENMP
 #pragma omp parallel
     {
-        ModuleBase::SphericalBesselTransformer local_sbt;
+        // caching: without it every row planned and destroyed its FFTW plan (inside the planner's
+        // global critical section, so the threads queued on it) and re-tabulated the low-k j_l of
+        // radrfft's direct part; the jobs run l by l, so a thread's table is reused. Same plan flag
+        // and same j_l values: the rows are unchanged bit for bit
+        ModuleBase::SphericalBesselTransformer local_sbt(true);
 #pragma omp for schedule(dynamic)
         for (std::ptrdiff_t i = 0; i < njob; ++i)
         {
@@ -121,7 +180,8 @@ void TwoCenterTable::_collect_jobs(
             for (const NumericalRadial* const* it1 = bra.cbegin(l1); it1 != bra.cend(l1); ++it1)
                 for (int l2 = std::abs(l1 - l); l2 <= std::min(ket.lmax(), l + l1); l2 += 2)
                     for (const NumericalRadial* const* it2 = ket.cbegin(l2); it2 != ket.cend(l2); ++it2)
-                        jobs.emplace_back(*it1, *it2, l);
+                        if ((!symmetric_ || canonical(*it1, *it2)) && !direct((*it1)->itype(), (*it2)->itype()))
+                            jobs.emplace_back(*it1, *it2, l);
 }
 
 const double* TwoCenterTable::table(const int itype1,
@@ -164,9 +224,24 @@ void TwoCenterTable::lookup(const int itype1,
         return;
     }
 
-    const double* tab = table(itype1, l1, izeta1, itype2, l2, izeta2, l, false);
-    const double* dtab = table(itype1, l1, izeta1, itype2, l2, izeta2, l, true);
-    ModuleBase::CubicSpline::eval(nr_, rgrid_.data(), tab, dtab, 1, &R, val, dval);
+    const int itab = index_map_.get_value<int>(itype1, l1, izeta1, itype2, l2, izeta2, l);
+    const double* tab = table_.inner_most_ptr<double>(itab);
+    const double* dtab = dtable_.inner_most_ptr<double>(itab);
+    // CubicSpline::eval on the table's knots, inline: the same segment (upper_bound on the knots)
+    // and the same arithmetic, so the same numbers, without its two heap buffers per call (the
+    // block kernel looks a table up ~10^5-10^6 times per block, and those mallocs dominated it)
+    const double* x = rgrid_.data();
+    int p = static_cast<int>(std::upper_bound(x, x + nr_, R) - x) - 1;
+    p -= (p == nr_ - 1);
+    const double dx = x[p + 1] - x[p];
+    const double inv_dx = 1.0 / dx;
+    const double dd = (tab[p + 1] - tab[p]) * inv_dx;
+    const double w = R - x[p];
+    const double c0 = tab[p], c1 = dtab[p];
+    const double c3 = (c1 + dtab[p + 1] - 2.0 * dd) * inv_dx * inv_dx;
+    const double c2 = (dd - c1) * inv_dx - c3 * dx;
+    if (val) *val = ((c3 * w + c2) * w + c1) * w + c0;
+    if (dval) *dval = (3.0 * c3 * w + 2.0 * c2) * w + c1;
 }
 
 int& TwoCenterTable::table_index(const NumericalRadial* it1, const NumericalRadial* it2, const int l)
@@ -178,6 +253,10 @@ void TwoCenterTable::cleanup()
 {
     op_ = '\0';
     kernel_ = ExxKernel::CoulombWeight{};
+    symmetric_ = false;
+    direct_.clear();
+    kw_.clear(); kc_.clear();
+    bra_ = ket_ = nullptr;
     ntab_ = 0;
     nr_ = 0;
     rmax_ = 0.0;
@@ -229,7 +308,21 @@ void TwoCenterTable::two_center_loop(const RadialCollection& bra, const RadialCo
 
 void TwoCenterTable::_indexing(const NumericalRadial* it1, const NumericalRadial* it2, const int l)
 {
+    if (direct(it1->itype(), it2->itype())) return;      // no row: the block kernel integrates it
+    if (symmetric_ && !canonical(it1, it2)) return;      // _mirror points it at (it2, it1, l)
     table_index(it1, it2, l) = ntab_++;
+}
+
+void TwoCenterTable::_mirror(const NumericalRadial* it1, const NumericalRadial* it2, const int l)
+{
+    if (!canonical(it1, it2) && !direct(it1->itype(), it2->itype())) table_index(it1, it2, l) = table_index(it2, it1, l);
+}
+
+bool TwoCenterTable::canonical(const NumericalRadial* it1, const NumericalRadial* it2)
+{
+    if (it1->itype() != it2->itype()) return it1->itype() < it2->itype();
+    if (it1->l() != it2->l()) return it1->l() < it2->l();
+    return it1->izeta() <= it2->izeta();
 }
 
 void TwoCenterTable::_tabulate(const NumericalRadial* it1, const NumericalRadial* it2, const int l)

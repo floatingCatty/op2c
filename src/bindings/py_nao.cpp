@@ -22,6 +22,9 @@
 #include "utils/log.h"
 #include <cstdlib>
 #include <filesystem>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace py = pybind11;
 
@@ -549,6 +552,50 @@ void bind_two_center_integrator(py::module &m) {
            py::arg("vR"), py::arg("with_grad") = false,
            "Evaluate the tabulated two-center integral at vR = R2 - R1. Returns the value, "
            "or (value, gradient) when with_grad.")
+        .def("calculate_lattice_block", [](const TwoCenterIntegrator& self, int itype1,
+                                           py::array_t<int, py::array::c_style | py::array::forcecast> f1,
+                                           int itype2,
+                                           py::array_t<int, py::array::c_style | py::array::forcecast> f2,
+                                           py::array_t<double, py::array::c_style | py::array::forcecast> vecs) {
+            if (f1.ndim() != 2 || f1.shape(1) != 3 || f2.ndim() != 2 || f2.shape(1) != 3)
+                throw std::invalid_argument("f1/f2 must be (n, 3) rows of (l, izeta, m)");
+            if (vecs.ndim() != 2 || vecs.shape(1) != 3)
+                throw std::invalid_argument("vecs must be (nv, 3)");
+            const long n1 = f1.shape(0), n2 = f2.shape(0), nv = vecs.shape(0);
+            const int* a = f1.data();
+            const int* b = f2.data();
+            const double* v = vecs.data();
+            py::array_t<double> out({n1, n2});
+            double* o = out.mutable_data();
+            std::fill(o, o + n1 * n2, 0.0);
+            {
+                py::gil_scoped_release nogil;
+                // threads over displacement chunks, each accumulating its own block
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+                {
+                    std::vector<double> acc(static_cast<std::size_t>(n1 * n2), 0.0);
+                    int nt = 1, it = 0;
+#ifdef _OPENMP
+                    nt = omp_get_num_threads();
+                    it = omp_get_thread_num();
+#endif
+                    const long k0 = nv * it / nt, k1 = nv * (it + 1) / nt;
+                    if (k1 > k0)
+                        self.calculate_block(itype1, static_cast<int>(n1), a, itype2, static_cast<int>(n2), b,
+                                             static_cast<int>(k1 - k0), v + 3 * k0, acc.data());
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+                    for (long i = 0; i < n1 * n2; ++i) o[i] += acc[i];
+                }
+            }
+            return out;
+        }, py::arg("itype1"), py::arg("f1"), py::arg("itype2"), py::arg("f2"), py::arg("vecs"),
+           "sum_k <f1_i | op | f2_j (. - vecs_k)> for all function pairs at once: f1/f2 are (n, 3) "
+           "rows (l, izeta, m), vecs (nv, 3) the R2 - R1 of every image. One call per block of a "
+           "lattice sum (e.g. the periodized auxiliary Coulomb matrix) instead of one per element.")
         .def("tabulate_position", [](TwoCenterIntegrator& self, const RadialCollection& bra,
                                       const RadialCollection& ket, const RadialCollection& ketp, const RadialCollection& ketm,
                                       int nr, double cutoff) {

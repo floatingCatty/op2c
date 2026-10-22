@@ -6,6 +6,10 @@
 #include "math/spherical_bessel_transformer.h"
 #include "nao/atomic_basis.h"
 #include "nao/radial_function.h"
+#include <array>
+#include <cmath>
+#include <functional>
+#include <map>
 #include <tuple>
 #include <vector>
 
@@ -24,8 +28,26 @@ class TwoCenterTable
                const int nr,                 //!< [in] number of table grid points
                const double cutoff,          //!< [in] cutoff radius of the table
                const double omega = 0.0,     //!< [in] erfc screening for op 'H' (bohr^-1)
-               const double r_cut = 0.0      //!< [in] spherical truncation for op 'C' (bohr)
+               const double r_cut = 0.0,     //!< [in] spherical truncation for op 'C' (bohr)
+               //! [in] element pairs (bra itype, ket itype) to tabulate; the others are left to a
+               //! direct quadrature on the k grid (TwoCenterIntegrator's block kernel): empty = all
+               const std::function<bool(int, int)>& tabulate_pair = {}
     );
+
+    //! whether the element pair (bra itype, ket itype) is evaluated directly, not tabulated
+    bool direct(const int itype1, const int itype2) const
+    {
+        return !direct_.empty() && direct_[static_cast<std::size_t>(itype1) * ntype_ket_ + itype2];
+    }
+    //! the collections of a build with direct pairs (kept by the caller for the table's lifetime)
+    const RadialCollection* bra() const { return bra_; }
+    const RadialCollection* ket() const { return ket_; }
+    //! the direct quadrature's weights on the radials' (uniform) k grid: trapezoid weight x k^2 x the
+    //! kernel x 4 pi -- the sum an FFT-compliant table row evaluates, so direct and tabulated agree
+    const std::vector<double>& direct_weight() const { return kw_; }
+    const std::vector<double>& direct_grid() const { return kc_; }
+    //! the quadrature's reach, pi / dk: its first alias image (2 pi / dk - R) must stay beyond R
+    double direct_rmax() const { return kc_.size() > 1 ? std::acos(-1.0) / (kc_[1] - kc_[0]) : 0.0; }
 
     /*!
      *  @name Getters
@@ -94,6 +116,12 @@ class TwoCenterTable
     /// (doc/design/27 §3.1). Default-constructed and unused for 'S'/'T'/'R'/'U'.
     ExxKernel::CoulombWeight kernel_{};
     int ntab_ = 0;     //!< number of table entries
+    std::vector<char> direct_;            //!< element pairs left to direct evaluation (bra x ket)
+    int ntype_ket_ = 0;
+    const RadialCollection* bra_ = nullptr;
+    const RadialCollection* ket_ = nullptr;
+    std::vector<double> kw_, kc_;   //!< direct quadrature weights and grid
+    bool symmetric_ = false;   //!< bra and ket the same collection: (a, b, l) and (b, a, l) share a row
     int nr_ = 0;       //!< number of radial points of each table
     double rmax_= 0.0; //!< cutoff radius of the table
     ModuleBase::SphericalBesselTransformer sbt_;
@@ -138,6 +166,10 @@ class TwoCenterTable
 
     /// various looped functions during the construction of table
     void _indexing(const NumericalRadial* it1, const NumericalRadial* it2, const int l);
+    /// symmetric build: point (it1, it2, l) at the row of (it2, it1, l) when it2 is the canonical first
+    void _mirror(const NumericalRadial* it1, const NumericalRadial* it2, const int l);
+    /// (itype, l, izeta) of it1 not after it2's: the ordered pair a symmetric build tabulates
+    static bool canonical(const NumericalRadial* it1, const NumericalRadial* it2);
     void _tabulate(const NumericalRadial* it1, const NumericalRadial* it2, const int l);
 
     /**

@@ -52,7 +52,10 @@ class TwoCenterIntegrator
                   const int nr,
                   const double cutoff,
                   const double omega = 0.0, //!< [in] erfc screening for the 'H' kernel op (bohr^-1)
-                  const double r_cut = 0.0  //!< [in] spherical truncation for the 'C' kernel op (bohr)
+                  const double r_cut = 0.0, //!< [in] spherical truncation for the 'C' kernel op (bohr)
+                  //! [in] element pairs to tabulate; the others are integrated on the k grid by
+                  //! calculate_block (no gradient), with bra / ket kept alive by the caller
+                  const std::function<bool(int, int)>& tabulate_pair = {}
     );
 
     ~TwoCenterIntegrator();
@@ -126,6 +129,38 @@ class TwoCenterIntegrator
                    double* out = nullptr,
                    double* grad_out = nullptr
     ) const;
+
+    /*!
+     * @brief A whole block of two-center integrals summed over displacements.
+     *
+     * out[i * n2 + j] += sum_k I_{f1_i, f2_j}(vecs_k), with f1 / f2 rows (l, izeta, m).
+     * Same arithmetic as calculate() element by element, but the solid harmonics are built
+     * once per displacement and each radial entry (l1 izeta1, l2 izeta2, l) is looked up
+     * once per displacement instead of once per (m1, m2) -- the form a lattice sum or an
+     * on-the-fly auxiliary Coulomb block needs. Not threaded (callers thread over blocks).
+     *                                                                                  */
+    void calculate_block(const int itype1, const int n1, const int* f1,
+                         const int itype2, const int n2, const int* f2,
+                         const int nv, const double* vecs, double* out) const;
+
+    /*!
+     * @brief The gradient of calculate_block with respect to the displacement.
+     *
+     * grad[(i * n2 + j) * 3 + c] += sum_k d I_{f1_i, f2_j}(vecs_k) / d vecs_k[c] -- the
+     * derivative for a rigid shift of centre 2 (every image moves with it). Same radial
+     * table, Gaunt lists and solid harmonics as calculate_block, plus their derivatives
+     * (the table's d(S/R^l)/dR and grad(R^l Y_lm)), as calculate() does element by element.
+     *                                                                                  */
+    void calculate_block_grad(const int itype1, const int n1, const int* f1,
+                              const int itype2, const int n2, const int* f2,
+                              const int nv, const double* vecs, double* grad) const;
+
+  private:
+    void block_kernel(const int itype1, const int n1, const int* f1,
+                      const int itype2, const int n2, const int* f2,
+                      const int nv, const double* vecs, double* out, double* grad) const;
+
+  public:
 
     /*!
      * @brief Advanced calculation method for joint Overlap and Position integrals.

@@ -200,10 +200,27 @@ void RadialSet::set_uniform_grid(const bool for_r_space,
                                  const char mode,
                                  const bool enable_fft)
 {
+    // Each radial's transform is independent; threads own their transformer (a transformer's
+    // state is shared between copies, so a shared one would race) -- the TwoCenterTable::build
+    // pattern. A set of hundreds of radials (exact-exchange triples) made this serial loop the
+    // setup's cost.
+#ifdef _OPENMP
+#pragma omp parallel if (nchi_ > 8)
+    {
+        ModuleBase::SphericalBesselTransformer local_sbt;
+#pragma omp for schedule(dynamic)
+        for (int i = 0; i < nchi_; i++)
+        {
+            chi_[i].set_transformer(local_sbt, 0);
+            chi_[i].set_uniform_grid(for_r_space, ngrid, cutoff, mode, enable_fft);
+        }
+    }
+#else
     for (int i = 0; i < nchi_; i++)
     {
         chi_[i].set_uniform_grid(for_r_space, ngrid, cutoff, mode, enable_fft);
     }
+#endif
     set_rcut_max();
 }
 
