@@ -219,7 +219,7 @@ int delChunk(void*p/*,char*fun,char*file,int line*/)
 	if(s->magic!=CHUNK_MAGIC)
 	{
 		/*freeing illegal pointer, or wrote out of bounds*/
-		fprintf(RTL,"** Magic is [%x], which is wrong...[ptr:%x]\n",s->magic,(int)p);
+		fprintf(RTL,"** Magic is [%x], which is wrong...[ptr:%p]\n",s->magic,p);
 		fprintf(RTL,"**  Either some buffer overflowed, or this is a bad pointer\n");
 		fprintf(RTL,"**  I'm just going to free it and see what happens... might segfault.\n");
 		fflush(RTL);
@@ -333,7 +333,7 @@ int delChunk(void*p/*,char*fun,char*file,int line*/)
 	//hmm, didnt find it in the list, must be foreign or error...
 	#ifdef MCD_VERBOSE
 	--chunkLock;
-	fprintf(RTL,"** Pointer [%08X] wasn't in list...\n",(int)p);
+	fprintf(RTL,"** Pointer [%p] wasn't in list...\n",p);
 	fprintf(RTL,"**  Either it came from an external library, or it's a bad pointer\n");
 	fprintf(RTL,"**  I'm just going to free it and see.  might segfault\n");
 	fflush(RTL); //mohan
@@ -379,8 +379,8 @@ void *MCD_malloc(int size,char*fun,char*file,int line)
 #endif
 	
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"malloc\t[%X][%i bytes]\tfrom %s:%s, line %i [id ",
-			(int)p+SOC,size,file,fun,line);
+	fprintf(RTL,"malloc\t[%p][%i bytes]\tfrom %s:%s, line %i [id ",
+			(void *)((char *)p+SOC),size,file,fun,line);
 	phex(RTL,idbase);
 #endif
 	addChunk(p,size,fun,file,line);
@@ -401,8 +401,8 @@ void *MCD_calloc(int size,char*fun,char*file,int line)
 	void*p=calloc(size,1);
 #endif
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"calloc\t[%X][%i bytes]\tfrom %s:%s, line %i [id ",
-			(int)p+SOC,size,file,fun,line);
+	fprintf(RTL,"calloc\t[%p][%i bytes]\tfrom %s:%s, line %i [id ",
+			(void *)((char *)p+SOC),size,file,fun,line);
 	phex(RTL,idbase);
 #endif
 
@@ -419,10 +419,9 @@ void *MCD_calloc(int size,char*fun,char*file,int line)
 void *MCD_realloc(void *p,int size,char*fun,char*file,int line)
 {
 #ifdef MCD_FASTFREE
-	Chunk *New,*Old;
+	Chunk *Old;
 
 	void*n=malloc(size+sizeof(Chunk));
-	New=(Chunk*)n;
 	Old=(Chunk*)p-sizeof(Chunk);
 	
 	if(Old->size==size)	//no change??
@@ -435,8 +434,8 @@ void *MCD_realloc(void *p,int size,char*fun,char*file,int line)
 	
 	
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"realloc\t[%X]->[%X][%i bytes]\tfrom %s:%s, line %i [id ",
-			(int)p+SOC,(int)n+SOC,size,file,fun,line);
+	fprintf(RTL,"realloc\t[%p]->[%p][%i bytes]\tfrom %s:%s, line %i [id ",
+			(void *)((char *)p+SOC),(void *)((char *)n+SOC),size,file,fun,line);
 	phex(RTL,idbase);
 #endif
 
@@ -447,8 +446,8 @@ void *MCD_realloc(void *p,int size,char*fun,char*file,int line)
 #else	//non-fastfree
 	void*n=realloc(p,size);
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"realloc [%X]->[%X][%ib] from %s:%s, line %i [id ",
-		(int)p+SOC,(int)n+SOC,size,file,fun,line);
+	fprintf(RTL,"realloc [%p]->[%p][%ib] from %s:%s, line %i [id ",
+		(void *)((char *)p+SOC),(void *)((char *)n+SOC),size,file,fun,line);
 	phex(RTL,idbase);
 #endif
 	delChunk(p/*,fun,file,line*/);
@@ -523,8 +522,8 @@ char *MCD_strdup(char*s,char*fun,char*file,int line)
 	n=strdup(s);	//unpointer'd version
 #endif
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"strdup\t[%X][%ib]\t\tfrom %s:%s, line %i [id ",
-			(int)n+SOC,(int)strlen(s),file,fun,line);
+	fprintf(RTL,"strdup\t[%p][%ib]\t\tfrom %s:%s, line %i [id ",
+			(void *)((char *)n+SOC),(int)strlen(s),file,fun,line);
 	phex(RTL,idbase);
 #endif
 	addChunk(n,strlen(s)+1,fun,file,line);
@@ -555,8 +554,8 @@ char *MCD_strndup(char*s, int z,char*fun,char*file,int line)
 	n=(char*)strndup(s,z);	//unpointer'd version
 #endif
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"strndup\t[%X][%ib]\t\tfrom %s:%s, line %i [id ",
-			(int)n+SOC,(int)size,file,fun,line);
+	fprintf(RTL,"strndup\t[%p][%ib]\t\tfrom %s:%s, line %i [id ",
+			(void *)((char *)n+SOC),(int)size,file,fun,line);
 	phex(RTL,idbase);
 #endif
 	addChunk(n,size+1,fun,file,line);
@@ -599,8 +598,8 @@ int MCD_asprintf(char **ptr,const char *fmt,char *fun, char*file, int line,...)
 	addChunk(*ptr, retval+1, fun, file, line);
 #endif
 	#ifdef MCD_VERBOSE
-		fprintf(RTL,"asprintf\t[%X][%ib]\t\tfrom %s:%s, line %i [id ",
-			(int)*ptr+SOC,retval+1,file,fun,line);
+		fprintf(RTL,"asprintf\t[%p][%ib]\t\tfrom %s:%s, line %i [id ",
+			(void *)((char *)*ptr+SOC),retval+1,file,fun,line);
 			phex(RTL,idbase);
 	#endif
 	return retval;
@@ -631,8 +630,8 @@ int MCD_vasprintf(char **ptr,const char *fmt,va_list argptr,char *fun, char*file
 	addChunk(*ptr, retval+1, fun, file, line);
 #endif
 	#ifdef MCD_VERBOSE
-		fprintf(RTL,"vasprintf\t[%X][%ib]\t\tfrom %s:%s, line %i [id ",
-			(int)*ptr+SOC,retval+1,file,fun,line);
+		fprintf(RTL,"vasprintf\t[%p][%ib]\t\tfrom %s:%s, line %i [id ",
+			(void *)((char *)*ptr+SOC),retval+1,file,fun,line);
 			phex(RTL,idbase);
 	#endif
 	return retval;
@@ -706,7 +705,6 @@ int MCD_sscanf(const char *str,const char *fmt,char*fun,char*file,int line,...)
 void scan_args(const char *fmt,va_list argptr,char*fun,char*file,int line)
 {
 	char **ptr;
-	void *dummy;	// clear up the unused warning
 
 	for(;*fmt;fmt++) {
 		if(*fmt!='%')
@@ -719,7 +717,7 @@ void scan_args(const char *fmt,va_list argptr,char*fun,char*file,int line)
 		case '%':
 			break;
 		default: /* next arg */
-			dummy=va_arg(argptr,void *);
+			(void)va_arg(argptr,void *);
 		break;
 		}
 	}
@@ -730,9 +728,9 @@ void MCD_free(void *p,char*fun,char*file,int line)
 {
 	//quiet the unused argument warnings when MCD_VERBOSE isn't defined
 #ifndef MCD_VERBOSE
-	void *dummy=&fun;
-	dummy=&file;
-	dummy=(char*)&line;
+	(void)fun;
+	(void)file;
+	(void)line;
 #endif	//MCD_VERBOSE
 	
 	if(!p)
@@ -751,8 +749,8 @@ void MCD_free(void *p,char*fun,char*file,int line)
 		return;		//we do nothing
 	}
 #ifdef MCD_VERBOSE
-	fprintf(RTL,"free\t[%X]\t\tfrom %s:%s, line %i\n",
-			(int)p,file,fun,line);
+	fprintf(RTL,"free\t[%p]\t\tfrom %s:%s, line %i\n",
+			p,file,fun,line);
 #endif
 	//should find id, but that's delchunk's job...
 
@@ -762,8 +760,8 @@ void MCD_free(void *p,char*fun,char*file,int line)
 		free(p-sizeof(Chunk));
 	else
 	{
-		fprintf(RTL,"** Bad or Foreign pointer [%08X] from %s:%s line %i\n",
-			(int)p,file,fun,line);
+		fprintf(RTL,"** Bad or Foreign pointer [%p] from %s:%s line %i\n",
+			p,file,fun,line);
 		fflush(RTL);
 		free(p);	//assume it's just a foreign pointer (could die)
 	}
@@ -791,8 +789,8 @@ void showMemStats()
 	fprintf(o,"Memory Stats:\n");
 	while(c)
 	{
-		fprintf(o,"%12i bytes allocated in [%s:%s], line %7i [%08X][id ",
-				c->size,c->function,c->file,c->line,(int)c->ptr+SOC);
+		fprintf(o,"%12i bytes allocated in [%s:%s], line %7i [%p][id ",
+				c->size,c->function,c->file,c->line,(void *)((char *)c->ptr+SOC));
 		phex(o,c->id);
 		total+=c->size;
 		c=c->next;
